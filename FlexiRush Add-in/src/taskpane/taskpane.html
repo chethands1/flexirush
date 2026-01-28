@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FlexiRush Receiver</title>
+    
+    <script type="text/javascript" src="https://appsforoffice.microsoft.com/lib/1.1/hosted/office.js"></script>
+    <link rel="stylesheet" href="https://static2.sharepointonline.com/files/fabric/office-ui-fabric-core/11.0.0/css/fabric.min.css">
+    
+    <style>
+        /* --- 1. CLEAN FOUNDATION --- */
+        :root {
+            --bg-setup: #0f172a;
+            --text-white: #ffffff;
+            --accent: #3b82f6;
+            --border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        body, html {
+            margin: 0; padding: 0; 
+            width: 100%; height: 100%;
+            background: transparent !important;
+            overflow: hidden;
+            font-family: 'Segoe UI', sans-serif;
+        }
+
+        /* --- 2. LAYERS --- */
+        
+        /* Layer A: Setup Screen (Visible only when disconnected) */
+        #layer-setup {
+            position: absolute; inset: 0;
+            background: var(--bg-setup);
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            z-index: 20;
+            transition: opacity 0.5s ease;
+        }
+        #layer-setup.hidden {
+            opacity: 0; pointer-events: none;
+        }
+
+        /* Layer B: The Visuals (Always ready) */
+        #layer-visuals {
+            position: absolute; inset: 0;
+            z-index: 10;
+        }
+
+        /* Layer C: Emergency Reset (Hidden corner) */
+        #reset-trigger {
+            position: absolute; top: 0; right: 0;
+            width: 20px; height: 20px;
+            z-index: 30; cursor: crosshair;
+        }
+        #reset-trigger:hover { background: rgba(255, 0, 0, 0.3); }
+
+        /* --- 3. UI COMPONENTS --- */
+        .brand {
+            font-size: 20px; font-weight: 700; color: var(--text-white);
+            margin-bottom: 20px; letter-spacing: 1px;
+        }
+
+        .input-code {
+            background: rgba(255,255,255,0.05);
+            border: var(--border); border-radius: 6px;
+            color: white; font-size: 24px; letter-spacing: 4px;
+            text-align: center; text-transform: uppercase;
+            padding: 12px; width: 180px; outline: none;
+            font-family: monospace; margin-bottom: 16px;
+        }
+        .input-code:focus { border-color: var(--accent); }
+
+        .btn-connect {
+            background: var(--accent); color: white;
+            border: none; border-radius: 6px;
+            padding: 12px; width: 180px;
+            font-weight: 600; cursor: pointer;
+            text-transform: uppercase; font-size: 12px;
+            transition: opacity 0.2s;
+        }
+        .btn-connect:hover { opacity: 0.9; }
+
+        .status-text {
+            margin-top: 24px; color: #64748b; font-size: 11px;
+            display: flex; gap: 6px; align-items: center;
+        }
+
+        iframe { width: 100%; height: 100%; border: none; background: transparent; }
+    </style>
+</head>
+<body class="ms-Fabric">
+
+    <div id="layer-setup">
+        <div class="brand">FLEXIRUSH</div>
+        
+        <input type="text" id="inp-code" class="input-code" placeholder="CODE" maxlength="6" aria-label="Session Code">
+        
+        <button id="btn-connect" class="btn-connect">
+            CONNECT DISPLAY
+        </button>
+
+        <div class="status-text">
+            <i class="ms-Icon ms-Icon--PC1" aria-hidden="true"></i>
+            <span>Control via Dashboard</span>
+        </div>
+    </div>
+
+    <div id="layer-visuals">
+        <iframe id="frame-content" title="Visual Layer" allowtransparency="true"></iframe>
+    </div>
+
+    <div id="reset-trigger" title="Double click to Reset"></div>
+
+    <script>
+        // --- CONFIGURATION ---
+        // Change to 'https://flexirush.vercel.app' in Production
+        const BASE_URL = "http://localhost:3000"; 
+
+        Office.onReady(() => {
+            const settings = Office.context.document.settings;
+            const savedCode = settings.get("flexirush_code");
+
+            // 1. Auto-Connect if code exists
+            if (savedCode) {
+                activate(savedCode);
+            }
+
+            // 2. Connect Handler
+            document.getElementById('btn-connect').onclick = () => {
+                const val = document.getElementById('inp-code').value.trim().toUpperCase();
+                if (val.length >= 3) {
+                    settings.set("flexirush_code", val);
+                    settings.saveAsync();
+                    activate(val);
+                }
+            };
+
+            // 3. Emergency Reset (Double click top-right corner)
+            document.getElementById('reset-trigger').ondblclick = () => {
+                settings.remove("flexirush_code");
+                settings.saveAsync(() => location.reload());
+            };
+        });
+
+        function activate(code) {
+            // Hide Setup
+            document.getElementById('layer-setup').classList.add('hidden');
+            
+            // Load Transparent View
+            const url = `${BASE_URL}/embed/presenter/${code}?transparent=true`;
+            document.getElementById('frame-content').src = url;
+        }
+    </script>
+</body>
+</html>

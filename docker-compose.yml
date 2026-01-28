@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # 1. REDIS (Real-time & Temporary State)
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2. POSTGRES DATABASE (Permanent Storage)
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: flexirush
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # CRITICAL FIX: This allows the backend to know when the DB is actually ready
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d flexirush"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 3. BACKEND (FastAPI)
+  backend:
+    build: ./backend
+    # Explicit command to ensure hot-reload works
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy # CRITICAL FIX: Waits for DB healthcheck to pass
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://user:password@db:5432/flexirush
+      # Renamed to match your Python code (GOOGLE_API_KEY)
+      - GOOGLE_API_KEY=AIzaSyCDYIqVJMbZv47Bc4Ak4MCYNqBC4ZgVrwg
+
+  # 4. FRONTEND (Next.js)
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8001
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

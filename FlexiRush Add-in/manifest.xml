@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xsi:type="ContentApp">
+  <Id>e5ceb0cf-c4e9-437f-a7f8-8eeaf763f58d</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Contoso</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="FlexiRush Remote"/>
+  <Description DefaultValue="Floating Remote Control for FlexiRush"/>
+  <IconUrl DefaultValue="https://localhost:3002/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:3002/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="https://www.contoso.com/help"/>
+  
+  <AppDomains>
+    <AppDomain>http://localhost:3000</AppDomain>
+  </AppDomains>
+  
+  <Hosts>
+    <Host Name="Presentation"/>
+  </Hosts>
+  
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:3002/taskpane.html"/>
+    <RequestedWidth>350</RequestedWidth>
+    <RequestedHeight>600</RequestedHeight>
+  </DefaultSettings>
+  
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>
