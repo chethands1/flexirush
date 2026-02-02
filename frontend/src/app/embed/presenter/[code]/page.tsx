@@ -145,7 +145,7 @@ export default function EmbedPresenterPage({ params }: { params: Promise<{ code:
             )}
 
             {quiz.state === "LEADERBOARD" && (
-                <div className={`bg-slate-900/90 p-8 rounded-3xl border border-slate-700 shadow-2xl inline-block ${isTransparent ? 'min-w-[600px] backdrop-blur-xl' : 'min-w-125'}`}>
+                <div className={`bg-slate-900/90 p-8 rounded-3xl border border-slate-700 shadow-2xl inline-block ${isTransparent ? 'min-w-150 backdrop-blur-xl' : 'min-w-125'}`}>
                     <h2 className="text-4xl font-bold text-yellow-400 mb-6">🏆 TOP PLAYERS</h2>
                     {Object.entries(quizScores || {}).sort(([,a], [,b]) => (b as number) - (a as number)).slice(0, 5).map(([name, score], i) => (
                         <div key={name} className="flex justify-between items-center py-4 border-b border-slate-800 last:border-0">
