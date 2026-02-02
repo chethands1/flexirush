@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useSessionStore, Question } from "@/store/sessionStore"; // Removed unused 'Quiz'
+import { useSessionStore, Question } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
 
 // --- DYNAMIC IMPORTS ---
@@ -38,7 +38,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const code = resolvedParams?.code || "";
   const router = useRouter();
 
-  // Connect to Realtime 
+  // Connect to Realtime
   useRealtime(code, "presenter");
 
   const { 
@@ -89,7 +89,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       if (!res.ok) throw new Error(`API Error: ${res.statusText}`);
       return await res.json();
     } catch (err) {
-      console.error(err);
+      console.error("❌ API Failed:", err);
       return null;
     }
   }, [code]);
@@ -108,12 +108,38 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   // --- HANDLERS ---
 
-  // PATCH: Logic updated to avoid double-starting the quiz
+  // SYSTEMATIC FIX: Only refresh state, do not re-trigger start
   const handleQuizCreated = useCallback(async () => {
-      // Just fetch the new state, don't POST /start again
+      console.log("🔄 Syncing Quiz State...");
       const data = await apiCall("/state");
       if (data?.quiz) setQuiz(data.quiz);
   }, [apiCall, setQuiz]);
+
+  const handleAction = async (actionFn: () => Promise<void>) => {
+    if (actionLoading) return;
+    setActionLoading(true);
+    await actionFn();
+    setTimeout(() => setActionLoading(false), 500);
+  };
+
+  const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
+  const handleNextQuizStep = () => handleAction(() => apiCall("/quiz/next", "POST"));
+  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/end", "POST")); 
+  const handleToggleQuestion = (qId: string) => apiCall(`/question/${qId}/toggle`, "POST");
+  const handleExport = () => window.location.href = `${API_URL}/api/session/${code}/export`;
+  
+  const handleBanUser = async (userName: string) => {
+    if (!confirm(`Are you sure you want to ban ${userName}?`)) return;
+    await apiCall("/ban", "POST", { name: userName });
+  };
+
+  const saveSettings = async () => {
+    await apiCall("/branding", "POST", { 
+        logo_url: tempLogo, 
+        theme_color: branding?.theme_color 
+    });
+    setShowSettings(false);
+  };
 
   const handleAiAnalyze = async () => {
     if (analyzing) return;
@@ -166,32 +192,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   };
 
-  const handleAction = async (actionFn: () => Promise<void>) => {
-    if (actionLoading) return;
-    setActionLoading(true);
-    await actionFn();
-    setTimeout(() => setActionLoading(false), 500);
-  };
-
-  const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
-  const handleNextQuizStep = () => handleAction(() => apiCall("/quiz/next", "POST"));
-  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/end", "POST")); 
-  const handleToggleQuestion = (qId: string) => apiCall(`/question/${qId}/toggle`, "POST");
-  const handleExport = () => window.location.href = `${API_URL}/api/session/${code}/export`;
-  
-  const handleBanUser = async (userName: string) => {
-    if (!confirm(`Are you sure you want to ban ${userName}?`)) return;
-    await apiCall("/ban", "POST", { name: userName });
-  };
-
-  const saveSettings = async () => {
-    await apiCall("/branding", "POST", { 
-        logo_url: tempLogo, 
-        theme_color: branding?.theme_color 
-    });
-    setShowSettings(false);
-  };
-
   const totalPollVotes = useMemo(() => {
     if (!currentPoll?.options) return 0;
     return (currentPoll.options as PollOption[]).reduce((acc, curr) => {
@@ -211,8 +211,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       );
   }
 
-  // --- PATCH: QUIZ HELPER ---
-  // Safely get the current question object even if data structure varies
+  // --- SAFE QUIZ DATA ACCESS ---
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const currentQ: any = (quiz && quiz.questions && quiz.questions[quiz.current_index]) ? quiz.questions[quiz.current_index] : null;
 
@@ -221,7 +220,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       
       {!isSidebar && <ReactionOverlay />}
 
-      {/* --- HEADER (Hide in Sidebar Mode) --- */}
+      {/* --- HEADER --- */}
       {!isSidebar && (
         <header className="flex justify-between items-center border-b border-slate-800 pb-4 mb-6 relative z-10">
             <div className="flex items-center gap-3">
@@ -258,13 +257,14 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       {/* --- MAIN GRID --- */}
       <main className={`grid gap-6 relative z-10 flex-1 overflow-hidden h-full ${isSidebar ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-3'}`}>
         
-        {/* --- LEFT PANEL (PREVIEW) - HIDE IN SIDEBAR MODE --- */}
+        {/* --- LEFT PANEL (LIVE VIEW) --- */}
         {!isSidebar && (
             <div className="lg:col-span-2 bg-slate-900/50 backdrop-blur-sm p-4 sm:p-8 rounded-2xl border border-slate-800 flex flex-col shadow-2xl relative overflow-y-auto custom-scrollbar min-h-[60vh]">
             
             {quiz ? (
                 <div className="flex flex-col h-full items-center justify-center text-center w-full animate-in fade-in zoom-in duration-300">
                     
+                    {/* QUIZ HEADER */}
                     <div className="flex justify-between items-center w-full mb-4 absolute top-4 px-6 z-20">
                         <h2 className="text-sm uppercase tracking-widest text-slate-400 font-bold max-w-[50%] truncate">{quiz.title}</h2>
                         <div className="flex gap-2">
@@ -285,6 +285,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         </div>
                     </div>
                     
+                    {/* STATE: LOBBY */}
                     {quiz.state === "LOBBY" && (
                         <div className="space-y-8">
                             <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-blue-400 to-purple-600">
@@ -305,48 +306,55 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         </div>
                     )}
 
-                    {/* PATCH: ADDED ROBUST DATA CHECK HERE */}
-                    {quiz.state === "QUESTION" && currentQ && (
+                    {/* STATE: QUESTION (LIVE) */}
+                    {quiz.state === "QUESTION" && (
                         <div className="w-full max-w-4xl pt-12">
-                            <div className="mb-8">
-                                <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8">
-                                    {/* PATCH: Handle both text and question fields */}
-                                    {currentQ.text || currentQ.question}
-                                </h3>
-                                <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
-                                    <div 
-                                        key={quiz.current_index} 
-                                        className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
-                                        /* webhint: ignore inline-styles */
-                                        style={{ 
-                                            width: '100%', 
-                                            animation: `width_linear ${currentQ.time_limit || 30}s linear forwards` 
-                                        }}
-                                    ></div>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
-                                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                                {currentQ.options.map((opt: any, i: number) => (
-                                    <div 
-                                        key={i} 
-                                        className={`p-6 rounded-xl text-xl font-bold flex items-center gap-4 text-white shadow-lg transition-transform hover:scale-[1.01] ${
-                                            ['bg-red-600', 'bg-blue-600', 'bg-yellow-600', 'bg-green-600'][i % 4]
-                                        }`}
-                                    >
-                                        <span className="text-2xl opacity-60 bg-black/20 w-10 h-10 flex items-center justify-center rounded-lg">
-                                            {['▲', '◆', '●', '■'][i]}
-                                        </span>
-                                        <span className="text-left">
-                                            {typeof opt === 'string' ? opt : opt.label}
-                                        </span>
+                            {currentQ ? (
+                                <>
+                                <div className="mb-8">
+                                    <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8">
+                                        {/* SYSTEMATIC FIX: Handle both possible AI field names */}
+                                        {currentQ.text || currentQ.question || "Mystery Question"}
+                                    </h3>
+                                    <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
+                                        <div 
+                                            key={quiz.current_index} 
+                                            className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
+                                            /* webhint: ignore inline-styles */
+                                            style={{ 
+                                                width: '100%', 
+                                                animation: `width_linear ${currentQ.time_limit || 30}s linear forwards` 
+                                            }}
+                                        ></div>
                                     </div>
-                                ))}
-                            </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
+                                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                                    {currentQ.options.map((opt: any, i: number) => (
+                                        <div 
+                                            key={i} 
+                                            className={`p-6 rounded-xl text-xl font-bold flex items-center gap-4 text-white shadow-lg transition-transform hover:scale-[1.01] ${
+                                                ['bg-red-600', 'bg-blue-600', 'bg-yellow-600', 'bg-green-600'][i % 4]
+                                            }`}
+                                        >
+                                            <span className="text-2xl opacity-60 bg-black/20 w-10 h-10 flex items-center justify-center rounded-lg">
+                                                {['▲', '◆', '●', '■'][i]}
+                                            </span>
+                                            <span className="text-left">
+                                                {typeof opt === 'string' ? opt : opt.label}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                                </>
+                            ) : (
+                                <div className="text-slate-500 italic">Waiting for question data...</div>
+                            )}
                         </div>
                     )}
 
+                    {/* STATE: LEADERBOARD */}
                     {quiz.state === "LEADERBOARD" && (
                         <div className="w-full max-w-lg pt-12">
                             <h3 className="text-4xl font-bold mb-8 text-yellow-400 drop-shadow-lg">🏆 Leaderboard</h3>
@@ -381,6 +389,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         </div>
                     )}
 
+                    {/* STATE: END */}
                     {quiz.state === "END" && (
                         <div className="space-y-8 animate-in zoom-in duration-500 pt-12">
                             <h1 className="text-6xl font-black text-transparent bg-clip-text bg-linear-to-r from-yellow-400 to-orange-500 drop-shadow-sm">
@@ -403,6 +412,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                 </div>
             ) : (
                 <>
+                {/* --- POLL & Q&A VIEW --- */}
                 <div className="flex justify-between items-center mb-6">
                     <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2">
                     {viewMode === "poll" ? "📊 Live Results" : "💬 Audience Q&A"}
