@@ -8,7 +8,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 interface AIQuizCreatorProps {
   sessionCode: string;
   onClose: () => void;
-  // We keep this for compatibility, but we will handle the launch internally
+  // Optional callback if parent needs to know, but we handle launch internally now
   onSuccess?: (quizData: Record<string, unknown>) => void; 
 }
 
@@ -30,7 +30,6 @@ export default function AIQuizCreator({ sessionCode, onClose, onSuccess }: AIQui
 
     try {
       // 1. GENERATE THE QUIZ
-      // We use the specific AI endpoint
       const genRes = await fetch(`${API_URL}/api/ai/generate-quiz`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -42,22 +41,31 @@ export default function AIQuizCreator({ sessionCode, onClose, onSuccess }: AIQui
           throw new Error(errData.detail || "AI Generation Failed");
       }
       
-      const quizData = await genRes.json();
+      const responseData = await genRes.json();
+      
+      // --- PATCH: UNWRAP THE DATA ---
+      // The AI endpoint returns { "quiz": { title: "...", questions: [...] } }
+      // But the Session endpoint expects just { title: "...", questions: [...] }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const payload = (responseData as any).quiz || responseData;
+
       setStatus("🚀 Launching Quiz...");
 
       // 2. START THE QUIZ IN THE SESSION
       const startRes = await fetch(`${API_URL}/api/session/${sessionCode}/quiz/start`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(quizData),
+          body: JSON.stringify(payload), // <--- Send the unwrapped payload
       });
 
       if (!startRes.ok) {
-          throw new Error("Failed to start quiz session");
+          const errDetail = await startRes.json().catch(() => ({}));
+          console.error("Validation Error Details:", errDetail);
+          throw new Error("Failed to start quiz session. (Data format error)");
       }
 
       // 3. SUCCESS
-      if (onSuccess) onSuccess(quizData);
+      if (onSuccess) onSuccess(payload);
       onClose();
 
     } catch (err: unknown) {
