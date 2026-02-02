@@ -5,7 +5,11 @@ import { useRouter } from "next/navigation";
 import { useSessionStore } from "@/store/sessionStore";
 import Link from "next/link";
 
-// PATCH: Define a simple interface for History items to avoid 'any'
+// --- PATCH: SMART URL SELECTOR ---
+// This ensures it works on Vercel (Cloud) AND your Laptop automatically.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+
+// PATCH: Define a simple interface for History items
 interface SessionHistoryItem {
   code: string;
   name: string;
@@ -24,7 +28,8 @@ export default function Home() {
   // Fetch History if Logged In
   useEffect(() => {
     if (token) {
-      fetch("http://localhost:8001/api/session/my-sessions", {
+      // PATCH: Use API_URL instead of localhost
+      fetch(`${API_URL}/api/session/my-sessions`, {
         headers: { Authorization: `Bearer ${token}` }
       })
       .then(res => {
@@ -34,16 +39,25 @@ export default function Home() {
         }
         return res.json();
       })
-      .then(data => setHistory(data || []));
+      .then(data => {
+          // Safety check: ensure data is an array before setting
+          if (Array.isArray(data)) {
+              setHistory(data);
+          } else {
+              setHistory([]);
+          }
+      })
+      .catch(err => console.error("Failed to load history:", err));
     }
-  }, [token, setToken]); // PATCH: Added setToken to dependency array
+  }, [token, setToken]);
 
   const handleCreate = async () => {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
     try {
-        const res = await fetch("http://localhost:8001/api/session/create", {
+        // PATCH: Use API_URL instead of localhost
+        const res = await fetch(`${API_URL}/api/session/create`, {
             method: "POST",
             headers
         });
