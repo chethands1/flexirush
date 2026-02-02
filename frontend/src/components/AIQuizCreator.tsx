@@ -8,14 +8,15 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 interface AIQuizCreatorProps {
   sessionCode: string;
   onClose: () => void;
-  // Allows any object structure to pass through to the parent
-  onSuccess: (quizData: Record<string, unknown>) => void; 
+  // We keep this for compatibility, but we will handle the launch internally
+  onSuccess?: (quizData: Record<string, unknown>) => void; 
 }
 
 export default function AIQuizCreator({ sessionCode, onClose, onSuccess }: AIQuizCreatorProps) {
   const [topic, setTopic] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [status, setStatus] = useState(""); // Feedback text
 
   const handleGenerate = async () => {
     if (!topic.trim()) {
@@ -25,35 +26,55 @@ export default function AIQuizCreator({ sessionCode, onClose, onSuccess }: AIQui
     
     setLoading(true);
     setError("");
+    setStatus("🧠 AI is thinking...");
 
     try {
-      const res = await fetch(`${API_URL}/api/session/${sessionCode}/quiz/generate`, {
+      // 1. GENERATE THE QUIZ
+      // We use the specific AI endpoint
+      const genRes = await fetch(`${API_URL}/api/ai/generate-quiz`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: topic }),
       });
 
-      if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.detail || "AI Service Unavailable");
+      if (!genRes.ok) {
+          const errData = await genRes.json().catch(() => ({}));
+          throw new Error(errData.detail || "AI Generation Failed");
       }
       
-      const data = await res.json();
-      
-      // Pass the data up to the parent (PresenterDashboard)
-      // The parent handles validation and starting the quiz on the server.
-      onSuccess(data.quiz || data); 
+      const quizData = await genRes.json();
+      setStatus("🚀 Launching Quiz...");
+
+      // 2. START THE QUIZ IN THE SESSION
+      const startRes = await fetch(`${API_URL}/api/session/${sessionCode}/quiz/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(quizData),
+      });
+
+      if (!startRes.ok) {
+          throw new Error("Failed to start quiz session");
+      }
+
+      // 3. SUCCESS
+      if (onSuccess) onSuccess(quizData);
       onClose();
-    } catch (err) {
+
+    } catch (err: unknown) {
       console.error(err);
-      setError("Failed to generate quiz. The AI might be busy, try again in a moment.");
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("Failed to generate quiz. Try a different topic.");
+      }
+      setStatus("");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-100 backdrop-blur-sm animate-in fade-in">
+    <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50 backdrop-blur-sm animate-in fade-in">
       <div className="bg-slate-900 border border-slate-700 p-8 rounded-2xl w-full max-w-md shadow-2xl relative">
         <button 
             onClick={onClose} 
@@ -83,6 +104,12 @@ export default function AIQuizCreator({ sessionCode, onClose, onSuccess }: AIQui
               onKeyDown={(e) => e.key === 'Enter' && handleGenerate()}
               autoFocus 
           />
+
+          {status && (
+              <div className="text-center text-purple-400 font-bold animate-pulse">
+                  {status}
+              </div>
+          )}
 
           {error && (
               <div className="p-3 bg-red-900/20 border border-red-900/50 rounded-lg text-red-400 text-sm text-center font-bold animate-in slide-in-from-top-1">
