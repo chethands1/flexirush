@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useSessionStore, Question, Quiz } from "@/store/sessionStore";
+import { useSessionStore, Question } from "@/store/sessionStore"; // Removed unused 'Quiz'
 import { useRealtime } from "@/hooks/useRealtime";
 
 // --- DYNAMIC IMPORTS ---
@@ -38,6 +38,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const code = resolvedParams?.code || "";
   const router = useRouter();
 
+  // Connect to Realtime 
   useRealtime(code, "presenter");
 
   const { 
@@ -76,6 +77,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     if (!token && resolvedParams) router.push("/login");
   }, [token, router, resolvedParams]);
 
+  // --- API HELPER ---
   const apiCall = useCallback(async (endpoint: string, method: "GET" | "POST" = "GET", body?: unknown) => {
     if (!code) return;
     try {
@@ -92,6 +94,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
+  // --- INITIAL STATE SYNC ---
   useEffect(() => {
     if (!code) return;
     apiCall("/state").then((data) => {
@@ -103,18 +106,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     });
   }, [code, apiCall, setQuiz, setPoll, setQuestions]);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const handleQuizCreated = useCallback(async (newQuizData: any) => {
-    if (newQuizData && newQuizData.title) {
-      await apiCall("/quiz/start", "POST", newQuizData as Quiz);
-      apiCall("/state").then((data) => {
-        if (data?.quiz) setQuiz(data.quiz);
-      });
-    } else {
-      apiCall("/state").then((data) => {
-        if (data?.quiz) setQuiz(data.quiz);
-      });
-    }
+  // --- HANDLERS ---
+
+  // PATCH: Logic updated to avoid double-starting the quiz
+  const handleQuizCreated = useCallback(async () => {
+      // Just fetch the new state, don't POST /start again
+      const data = await apiCall("/state");
+      if (data?.quiz) setQuiz(data.quiz);
   }, [apiCall, setQuiz]);
 
   const handleAiAnalyze = async () => {
@@ -143,9 +141,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     } else if (questions.length > 0) {
        contextData = questions.map(q => `Q: ${q.text} (${q.votes} votes)`);
     } else {
-        setAiSummary("Nothing active to analyze right now.");
-        setAnalyzing(false);
-        return;
+       setAiSummary("Nothing active to analyze right now.");
+       setAnalyzing(false);
+       return;
     }
 
     try {
@@ -177,7 +175,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
   const handleNextQuizStep = () => handleAction(() => apiCall("/quiz/next", "POST"));
-  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/reset", "POST"));
+  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/end", "POST")); 
   const handleToggleQuestion = (qId: string) => apiCall(`/question/${qId}/toggle`, "POST");
   const handleExport = () => window.location.href = `${API_URL}/api/session/${code}/export`;
   
@@ -212,6 +210,11 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         </div>
       );
   }
+
+  // --- PATCH: QUIZ HELPER ---
+  // Safely get the current question object even if data structure varies
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const currentQ: any = (quiz && quiz.questions && quiz.questions[quiz.current_index]) ? quiz.questions[quiz.current_index] : null;
 
   return (
     <div className={`min-h-screen bg-slate-950 text-white transition-all relative overflow-hidden flex flex-col font-sans ${isSidebar ? 'p-2' : 'p-4 sm:p-8'}`}>
@@ -302,11 +305,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         </div>
                     )}
 
-                    {quiz.state === "QUESTION" && quiz.questions[quiz.current_index] && (
+                    {/* PATCH: ADDED ROBUST DATA CHECK HERE */}
+                    {quiz.state === "QUESTION" && currentQ && (
                         <div className="w-full max-w-4xl pt-12">
                             <div className="mb-8">
                                 <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8">
-                                    {quiz.questions[quiz.current_index].text}
+                                    {/* PATCH: Handle both text and question fields */}
+                                    {currentQ.text || currentQ.question}
                                 </h3>
                                 <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
                                     <div 
@@ -315,14 +320,15 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                         /* webhint: ignore inline-styles */
                                         style={{ 
                                             width: '100%', 
-                                            animation: `width_linear ${quiz.questions[quiz.current_index].time_limit || 30}s linear forwards` 
+                                            animation: `width_linear ${currentQ.time_limit || 30}s linear forwards` 
                                         }}
                                     ></div>
                                 </div>
                             </div>
 
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full">
-                                {quiz.questions[quiz.current_index].options.map((opt: string, i: number) => (
+                                {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                                {currentQ.options.map((opt: any, i: number) => (
                                     <div 
                                         key={i} 
                                         className={`p-6 rounded-xl text-xl font-bold flex items-center gap-4 text-white shadow-lg transition-transform hover:scale-[1.01] ${
@@ -332,7 +338,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                         <span className="text-2xl opacity-60 bg-black/20 w-10 h-10 flex items-center justify-center rounded-lg">
                                             {['▲', '◆', '●', '■'][i]}
                                         </span>
-                                        <span className="text-left">{opt}</span>
+                                        <span className="text-left">
+                                            {typeof opt === 'string' ? opt : opt.label}
+                                        </span>
                                     </div>
                                 ))}
                             </div>
@@ -347,14 +355,16 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     .sort(([,a], [,b]) => (b as number) - (a as number))
                                     .slice(0, 5)
                                     .map(([name, score], i) => (
-                                    <div key={name} className="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700 animate-in slide-in-from-bottom-2 fade-in" style={{ animationDelay: `${i * 100}ms` }}>
-                                        <div className="flex items-center gap-4">
-                                            <span className={`font-black text-xl w-8 text-center ${i===0?'text-yellow-400': i===1 ? 'text-slate-300' : i===2 ? 'text-orange-400' : 'text-slate-500'}`}>
-                                                {i+1}
-                                            </span>
-                                            <span className="text-lg font-medium">{name}</span>
-                                        </div>
-                                        <span className="font-mono font-bold text-blue-400">{score as number} pts</span>
+                                    <div key={name} className="flex justify-between items-center bg-slate-800 p-4 rounded-xl border border-slate-700 animate-in slide-in-from-bottom-2 fade-in" 
+                                    /* webhint: ignore inline-styles */
+                                    style={{ animationDelay: `${i * 100}ms` }}>
+                                            <div className="flex items-center gap-4">
+                                                <span className={`font-black text-xl w-8 text-center ${i===0?'text-yellow-400': i===1 ? 'text-slate-300' : i===2 ? 'text-orange-400' : 'text-slate-500'}`}>
+                                                    {i+1}
+                                                </span>
+                                                <span className="text-lg font-medium">{name}</span>
+                                            </div>
+                                            <span className="font-mono font-bold text-blue-400">{score as number} pts</span>
                                     </div>
                                 ))}
                                 {Object.keys(quizScores || {}).length === 0 && (
@@ -713,7 +723,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
               >
                 <div className="flex flex-col">
                     <span className="text-sm">Analyze Room Vibe</span>
-                    <span className="text-[10px] opacity-70 font-normal">Powered by Gemini AI</span>
+                    <span className="text-xs opacity-70 font-normal">Powered by Gemini AI</span>
                 </div>
                 <span className={analyzing ? "animate-spin text-xl" : "text-xl"}>{analyzing ? "⚙️" : "🔮"}</span>
               </button>
