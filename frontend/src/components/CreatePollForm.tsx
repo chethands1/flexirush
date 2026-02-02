@@ -2,6 +2,9 @@
 
 import { useState } from "react";
 
+// --- PATCH: SMART URL SELECTOR ---
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+
 interface CreatePollFormProps {
   sessionCode: string;
   onClose: () => void;
@@ -28,7 +31,8 @@ export default function CreatePollForm({ sessionCode, onClose }: CreatePollFormP
         correct_option: null 
       };
 
-      const res = await fetch(`http://localhost:8001/api/session/${sessionCode}/poll/start`, {
+      // PATCH: Use API_URL here
+      const res = await fetch(`${API_URL}/api/session/${sessionCode}/poll/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -36,12 +40,13 @@ export default function CreatePollForm({ sessionCode, onClose }: CreatePollFormP
 
       if (!res.ok) {
         const err = await res.json();
-        alert(`Error: ${err.detail?.[0]?.msg || "Failed to start poll"}`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        alert(`Error: ${(err.detail as any)?.[0]?.msg || "Failed to start poll"}`);
       } else {
         onClose();
       }
     } catch {
-      alert("Network error.");
+      alert("Network error. Is the backend running?");
     } finally {
       setLoading(false);
     }
@@ -54,7 +59,6 @@ export default function CreatePollForm({ sessionCode, onClose }: CreatePollFormP
         
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            {/* FIX: Added htmlFor to link label to input */}
             <label htmlFor="poll-question" className="text-xs font-bold text-slate-500 uppercase">Question</label>
             <input 
               id="poll-question"
@@ -67,7 +71,6 @@ export default function CreatePollForm({ sessionCode, onClose }: CreatePollFormP
           </div>
 
           <div>
-            {/* FIX: Added htmlFor and aria-label to satisfy accessibility linter */}
             <label htmlFor="poll-type" className="text-xs font-bold text-slate-500 uppercase">Type</label>
             <select 
               id="poll-type"
