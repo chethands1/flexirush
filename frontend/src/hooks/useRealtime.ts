@@ -2,6 +2,12 @@ import { useEffect, useRef } from 'react';
 import { useSessionStore, Participant } from '@/store/sessionStore';
 import { useRouter } from 'next/navigation';
 
+// --- PATCH: SMART URL SELECTOR ---
+// 1. Get the HTTP URL (Cloud or Local)
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+// 2. Convert to WebSocket URL (http -> ws, https -> wss)
+const WS_URL = API_URL.replace(/^http/, 'ws'); 
+
 export function useRealtime(sessionCode: string, myName?: string | null) {
   const ws = useRef<WebSocket | null>(null);
   const router = useRouter();
@@ -25,7 +31,9 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
 
       const rolePath = myName ? encodeURIComponent(myName) : "presenter";
-      const wsUrl = `ws://localhost:8001/ws/${sessionCode}/${rolePath}`; 
+      
+      // PATCH: Use the Smart WS_URL
+      const wsUrl = `${WS_URL}/ws/${sessionCode}/${rolePath}`;
       
       console.log(`🔌 Connecting WS to ${wsUrl}`);
       ws.current = new WebSocket(wsUrl);
@@ -35,7 +43,8 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
         setConnected(true);
         
         // 2. Initial State Fetch
-        fetch(`http://localhost:8001/api/session/${sessionCode}/state`)
+        // PATCH: Use the Smart API_URL
+        fetch(`${API_URL}/api/session/${sessionCode}/state`)
           .then(res => res.ok ? res.json() : null)
           .then(data => {
             if (!data) return;
@@ -117,7 +126,9 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
 
       ws.current.onclose = (e) => {
         setConnected(false);
+        // Only reconnect if we are still on the session page
         if (e.code !== 1000 && window.location.pathname.includes(sessionCode)) {
+          console.log(`⚠️ WS Closed. Reconnecting in 3s...`);
           reconnectTimeout.current = setTimeout(connect, 3000);
         }
       };

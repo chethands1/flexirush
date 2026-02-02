@@ -1,97 +1,42 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useSessionStore } from "@/store/sessionStore";
+import { useRealtime } from "@/hooks/useRealtime";
+import { api } from "@/lib/api";
 
-// Dynamic import for the reaction overlay (emojis floating up)
+// Dynamic import for the reaction overlay
 const ReactionOverlay = dynamic(() => import("@/components/ReactionOverlay"), { ssr: false });
 
-// === CUSTOM HOOK FOR AUDIENCE SOCKET ===
-// Manages the WebSocket connection, heartbeat, and state synchronization
-function useAudienceSocket(sessionCode: string, myName: string | null, onKick: () => void) {
-  const ws = useRef<WebSocket | null>(null);
-  
-  const { 
-    setConnected, 
-    setPoll, 
-    setQuestions, 
-    setParticipants, 
-    setQuiz, 
-    setQuizScores, 
-    setLastReaction, 
-    setBranding 
-  } = useSessionStore();
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 
-  useEffect(() => {
-    if (!sessionCode || !myName) return;
+// --- TYPES (Fixes 'any' errors) ---
+interface Question {
+  id: string;
+  text: string;
+  votes: number;
+  visible?: boolean;
+}
 
-    const connect = () => {
-      const wsUrl = `ws://localhost:8001/ws/${sessionCode}/${encodeURIComponent(myName)}`;
-      ws.current = new WebSocket(wsUrl);
+interface PollOption {
+  label: string;
+}
 
-      ws.current.onopen = () => {
-        setConnected(true);
-        // Initial Sync: Fetch state via REST to get immediate data
-        fetch(`http://localhost:8001/api/session/${sessionCode}/state`)
-          .then(res => res.json())
-          .then(data => {
-             if(data.current_poll) setPoll(data.current_poll);
-             if(data.questions) setQuestions(data.questions);
-             if(data.quiz) setQuiz(data.quiz);
-             if(data.branding) setBranding(data.branding);
-             if(data.participants) setParticipants(data.participants);
-          })
-          .catch(e => console.error("Sync error:", e));
-      };
+interface Poll {
+  type: string;
+  question: string;
+  options?: PollOption[];
+}
 
-      ws.current.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            
-            // Handle all event types
-            switch (data.type) {
-                case 'POLL_START':
-                case 'POLL_UPDATE':
-                    setPoll(data.payload);
-                    break;
-                case 'QNA_UPDATE':
-                    setQuestions(data.payload);
-                    break;
-                case 'PARTICIPANT_UPDATE':
-                    setParticipants(data.participants);
-                    break;
-                case 'REACTION':
-                    setLastReaction(data.emoji);
-                    break;
-                case 'BRANDING_UPDATE':
-                    setBranding(data.payload);
-                    break;
-                case 'QUIZ_UPDATE':
-                    setQuiz(data.quiz);
-                    setQuizScores(data.scores);
-                    break;
-                case 'USER_KICKED':
-                    if (data.target_name === myName) onKick();
-                    break;
-            }
-        } catch (e) { 
-            console.error("WebSocket Message Error:", e); 
-        }
-      };
+interface QuizQuestion {
+  options: string[];
+}
 
-      ws.current.onclose = () => {
-          setConnected(false);
-          // Simple reconnect logic could go here
-      };
-    };
-
-    connect();
-
-    return () => {
-        ws.current?.close();
-    };
-  }, [sessionCode, myName, onKick, setConnected, setPoll, setQuestions, setParticipants, setQuiz, setQuizScores, setLastReaction, setBranding]);
+interface Quiz {
+  state: string;
+  current_index: number;
+  questions: QuizQuestion[];
 }
 
 // === MAIN COMPONENT ===
@@ -104,63 +49,60 @@ export default function AudiencePage({ params }: { params: Promise<{ code: strin
 
   const code = resolvedParams?.code || "";
   
+  // Store State
   const { currentPoll, questions, isConnected, quiz, branding, participants } = useSessionStore();
   
+  // Local State
   const [name, setName] = useState("");
   const [isJoined, setIsJoined] = useState(false);
   const [activeTab, setActiveTab] = useState<"poll" | "qna">("poll");
   const [newQuestion, setNewQuestion] = useState("");
   const [errorMsg, setErrorMsg] = useState(""); 
 
-  const handleKick = useCallback(() => {
-      alert("You have been removed from the session.");
-      window.location.href = "/"; 
-  }, []);
-
-  useAudienceSocket(code, isJoined ? name : null, handleKick);
+  // --- HOOK: REALTIME CONNECTION ---
+  useRealtime(code, isJoined ? name : null);
 
   const handleJoin = async () => {
     if (!name.trim()) return;
     setErrorMsg("");
     
     try {
-        const res = await fetch(`http://localhost:8001/api/session/${code}/join`, {
-            method: "POST", 
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({ name })
-        });
-        
-        if (res.ok) {
-            setIsJoined(true);
+        await api.joinSession(code, name);
+        setIsJoined(true);
+    } catch (err: unknown) {
+        console.error(err);
+        if (err instanceof Error) {
+            setErrorMsg(err.message || "Session not found or connection failed.");
         } else {
-            setErrorMsg("Session not found or closed.");
+            setErrorMsg("An unexpected error occurred.");
         }
-    } catch (e) {
-        setErrorMsg("Connection failed. Is backend running?");
-        console.error(e);
     }
   };
 
   const handleAsk = async () => {
       if(!newQuestion.trim()) return;
-      await fetch(`http://localhost:8001/api/session/${code}/question`, {
-          method: "POST", 
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ text: newQuestion })
-      });
-      setNewQuestion("");
+      try {
+        await api.postQuestion(code, newQuestion);
+        setNewQuestion("");
+      } catch (e) {
+        console.error("Failed to post question", e);
+      }
   };
 
   const handleUpvote = async (qId: string) => {
-      await fetch(`http://localhost:8001/api/session/${code}/question/${qId}/upvote`, { method: "POST" });
+      try {
+        await api.upvoteQuestion(code, qId);
+      } catch (e) {
+        console.error("Failed to upvote", e);
+      }
   };
 
   const sendReaction = (emoji: string) => {
-      fetch(`http://localhost:8001/api/session/${code}/react`, {
+      fetch(`${API_URL}/api/session/${code}/react`, {
           method: "POST", 
           headers: {"Content-Type": "application/json"}, 
           body: JSON.stringify({ emoji })
-      });
+      }).catch(err => console.error("Reaction failed", err));
   };
 
   // --- RENDER: LOADING ---
@@ -172,8 +114,8 @@ export default function AudiencePage({ params }: { params: Promise<{ code: strin
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-white">
         <div className="w-full max-w-sm bg-slate-900 p-8 rounded-2xl border border-slate-800 shadow-2xl">
           {branding?.logo_url && (
-             // eslint-disable-next-line @next/next/no-img-element
-             <img src={branding.logo_url} alt="Logo" className="w-16 h-16 mx-auto mb-4 object-contain rounded" />
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={branding.logo_url} alt="Logo" className="w-16 h-16 mx-auto mb-4 object-contain rounded" />
           )}
           <h1 className="text-2xl font-bold text-center mb-6">Join Session: {code}</h1>
           
@@ -200,9 +142,12 @@ export default function AudiencePage({ params }: { params: Promise<{ code: strin
   }
 
   // --- RENDER: QUIZ MODE (Overrides Dashboard) ---
-  if (quiz && quiz.state !== 'END') {
-      return <QuizView quiz={quiz} code={code} name={name} />;
+  if (quiz && (quiz as Quiz).state !== 'END') {
+      return <QuizView quiz={quiz as Quiz} code={code} name={name} />;
   }
+
+  // Cast questions safely to avoid 'any' errors in map/filter
+  const safeQuestions = (questions as Question[]) || [];
 
   // --- RENDER: MAIN DASHBOARD ---
   return (
@@ -251,17 +196,18 @@ export default function AudiencePage({ params }: { params: Promise<{ code: strin
                     <div className="text-4xl mt-2">☕</div>
                 </div>
             ) : (
-                <PollView poll={currentPoll} code={code} />
+                <PollView poll={currentPoll as Poll} code={code} />
             )
         ) : (
             <div className="flex flex-col h-[60vh]">
                 <div className="flex-1 overflow-y-auto space-y-3 mb-4 pr-1 custom-scrollbar">
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    {questions.filter((q:any) => q.visible !== false).length === 0 && (
+                    {safeQuestions.filter(q => q.visible !== false).length === 0 && (
                         <div className="text-center text-slate-500 py-10">No questions yet.</div>
                     )}
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    {questions.filter((q:any) => q.visible !== false).sort((a:any,b:any) => b.votes - a.votes).map((q: any) => (
+                    {safeQuestions
+                        .filter(q => q.visible !== false)
+                        .sort((a, b) => b.votes - a.votes)
+                        .map((q) => (
                         <div key={q.id} className="bg-slate-900 p-4 rounded-xl border border-slate-800 flex justify-between gap-3">
                             <p className="text-sm text-slate-300">{q.text}</p>
                             <button onClick={() => handleUpvote(q.id)} className="flex flex-col items-center bg-slate-800 px-3 rounded hover:bg-slate-700 transition">
@@ -296,18 +242,17 @@ export default function AudiencePage({ params }: { params: Promise<{ code: strin
 }
 
 // === SUB-COMPONENT: QUIZ VIEW ===
-// Handles the entire Quiz lifecycle for the audience
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function QuizView({ quiz, code, name }: { quiz: any, code: string, name: string }) {
+function QuizView({ quiz, code, name }: { quiz: Quiz, code: string, name: string }) {
     const [answered, setAnswered] = useState(false);
 
     const submitAnswer = async (index: number) => {
         if(answered) return;
         setAnswered(true);
-        await fetch(`http://localhost:8001/api/session/${code}/quiz/answer`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ user_name: name, option_index: index })
-        });
+        try {
+            await api.submitQuizAnswer(code, name, index);
+        } catch (e) {
+            console.error("Quiz submission failed", e);
+        }
     };
 
     if (quiz.state === "LOBBY") {
@@ -344,8 +289,7 @@ function QuizView({ quiz, code, name }: { quiz: any, code: string, name: string 
                 </div>
             ) : (
                 <div className="grid grid-cols-2 gap-4 w-full max-w-md h-[50vh]">
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    {quiz.questions[quiz.current_index].options.map((_: any, i: number) => (
+                    {quiz.questions[quiz.current_index].options.map((_, i) => (
                         <button 
                             key={i} 
                             onClick={() => submitAnswer(i)} 
@@ -363,20 +307,20 @@ function QuizView({ quiz, code, name }: { quiz: any, code: string, name: string 
 }
 
 // === SUB-COMPONENT: POLL VIEW ===
-// Renders specific UI based on poll type (MCQ, Rating, etc)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function PollView({ poll, code }: { poll: any, code: string }) {
+function PollView({ poll, code }: { poll: Poll, code: string }) {
     const [hasVoted, setHasVoted] = useState(false);
     const [textInput, setTextInput] = useState("");
 
     const handleVote = async (value: string | number) => {
-        // Prevent double voting for static poll types
         if (hasVoted && poll.type !== "word_cloud" && poll.type !== "open_ended") return;
         
-        // Optimistic UI update
         if (poll.type !== "word_cloud" && poll.type !== "open_ended") setHasVoted(true);
         
-        await fetch(`http://localhost:8001/api/session/${code}/vote?value=${encodeURIComponent(value)}`, { method: 'POST' });
+        try {
+            await api.vote(code, value);
+        } catch (e) {
+            console.error("Voting failed", e);
+        }
         
         if (poll.type === "word_cloud" || poll.type === "open_ended") setTextInput("");
     };
@@ -387,8 +331,7 @@ function PollView({ poll, code }: { poll: any, code: string }) {
             
             {poll.type === "multiple_choice" && (
                 <div className="space-y-3">
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    {poll.options?.map((opt: any, idx: number) => (
+                    {poll.options?.map((opt, idx) => (
                         <button 
                             key={idx} 
                             onClick={() => handleVote(idx)} 
