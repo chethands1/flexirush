@@ -81,15 +81,18 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const apiCall = useCallback(async (endpoint: string, method: "GET" | "POST" = "GET", body?: unknown) => {
     if (!code) return;
     try {
+      // console.log(`📡 API CALL: ${method} ${endpoint}`);
       const res = await fetch(`${API_URL}/api/session/${code}${endpoint}`, {
         method,
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!res.ok) throw new Error(`API Error: ${res.statusText}`);
+      if (!res.ok) throw new Error(`API Error ${res.status}: ${res.statusText}`);
       return await res.json();
     } catch (err) {
       console.error("❌ API Failed:", err);
+      // Alert user on action failure, but ignore background fetch errors
+      if (method === "POST") alert("Action failed. Check connection.");
       return null;
     }
   }, [code]);
@@ -108,9 +111,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   // --- HANDLERS ---
 
-  // SYSTEMATIC FIX: Only refresh state, do not re-trigger start
+  // FIX: This now ONLY refreshes state. It does NOT try to start the quiz again.
   const handleQuizCreated = useCallback(async () => {
-      console.log("🔄 Syncing Quiz State...");
       const data = await apiCall("/state");
       if (data?.quiz) setQuiz(data.quiz);
   }, [apiCall, setQuiz]);
@@ -124,7 +126,10 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
   const handleNextQuizStep = () => handleAction(() => apiCall("/quiz/next", "POST"));
-  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/end", "POST")); 
+  
+  // FIX: Points to /reset to clear the quiz state completely
+  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/reset", "POST")); 
+  
   const handleToggleQuestion = (qId: string) => apiCall(`/question/${qId}/toggle`, "POST");
   const handleExport = () => window.location.href = `${API_URL}/api/session/${code}/export`;
   
@@ -349,7 +354,15 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </div>
                                 </>
                             ) : (
-                                <div className="text-slate-500 italic">Waiting for question data...</div>
+                                <div className="flex flex-col items-center justify-center text-slate-500 gap-4">
+                                    <p className="italic">Waiting for question data...</p>
+                                    <button 
+                                        onClick={handleNextQuizStep} 
+                                        className="text-xs bg-slate-800 px-3 py-1 rounded text-slate-300 hover:text-white"
+                                    >
+                                        Force Next ⏭
+                                    </button>
+                                </div>
                             )}
                         </div>
                     )}
