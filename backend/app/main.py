@@ -79,16 +79,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# --- CORS MIDDLEWARE (CRITICAL FIX APPLIED) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://flexirush.vercel.app",
+        "https://www.flexirush.com",  # <-- Added for production
+        "https://flexirush.com",      # <-- Added for production
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Connect to Redis (Container name 'redis', port 6379)
-redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+# NOTE: Ensure REDIS_URL env var is set in deployment, fallback to localhost for dev
+redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
+redis_client = redis.from_url(redis_url, decode_responses=True)
 client = None # Will be set in lifespan
 
 # --- MODELS ---
@@ -168,6 +176,10 @@ async def save_session_data(code: str, data: dict):
     await redis_client.set(f"session:{code}", json.dumps(data), ex=86400) # 24 hours expiry
 
 # --- ROUTES ---
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "FlexiRush Backend"}
 
 @app.post("/register")
 async def register(user: UserAuth):
@@ -253,7 +265,7 @@ async def end_poll(code: str):
     return {"status": "ended"}
 
 @app.post("/api/session/{code}/vote")
-async def vote(code: str, value: str):
+async def vote(code: str, value: str = Body(..., embed=True)): # Fixed to accept plain body or JSON
     data = await get_session_data(code)
     if not data or not data.get('current_poll'): return {"error": "No poll"}
     
@@ -265,9 +277,10 @@ async def vote(code: str, value: str):
         try:
             # Try to handle index-based voting if value is an integer
             idx = int(value)
-            opt = poll['options'][idx]
-            opt['votes'] = opt.get('votes', 0) + 1
-            data['poll_results'][opt['label']] = data['poll_results'].get(opt['label'], 0) + 1
+            if 0 <= idx < len(poll['options']):
+                opt = poll['options'][idx]
+                opt['votes'] = opt.get('votes', 0) + 1
+                data['poll_results'][opt['label']] = data['poll_results'].get(opt['label'], 0) + 1
         except:
             # Fallback to string-based voting
             data['poll_results'][value] = data['poll_results'].get(value, 0) + 1
@@ -280,7 +293,7 @@ async def vote(code: str, value: str):
         poll['average'] = round(total_score / total_votes, 1) if total_votes > 0 else 0
 
     elif poll_type in ['word_cloud', 'open_ended']:
-        val = value.strip()
+        val = str(value).strip()
         if not val: return
         
         if poll_type == 'word_cloud':
