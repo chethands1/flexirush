@@ -29,13 +29,18 @@ export default function EmbedPresenterPage({ params }: { params: Promise<{ code:
   // --- RENDERING HELPERS ---
   const totalPollVotes = useMemo(() => {
     if (!currentPoll?.options) return 0;
-    return (currentPoll.options as { label: string; votes: number }[]).reduce((acc, curr) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (currentPoll.options as any[]).reduce((acc, curr) => {
         const liveVotes = pollResults?.[curr.label];
         return acc + (liveVotes !== undefined ? liveVotes : (curr.votes || 0));
     }, 0);
   }, [currentPoll, pollResults]);
 
   if (!code) return null;
+
+  // Safe Quiz Data Access
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const currentQ: any = quiz?.questions?.[quiz.current_index];
 
   return (
     <div className={`min-h-screen flex flex-col items-center justify-center font-sans transition-colors overflow-hidden ${isTransparent ? 'bg-transparent' : 'bg-slate-950 p-4'} text-white`}>
@@ -121,15 +126,16 @@ export default function EmbedPresenterPage({ params }: { params: Promise<{ code:
                 </div>
             )}
 
-            {quiz.state === "QUESTION" && quiz.questions[quiz.current_index] && (
+            {quiz.state === "QUESTION" && currentQ && (
                 <div>
                     <h2 className="text-4xl sm:text-6xl font-bold mb-12 leading-tight drop-shadow-xl text-white">
-                        {quiz.questions[quiz.current_index].text}
+                        {currentQ.text}
                     </h2>
                     <div className="grid grid-cols-2 gap-6">
-                        {quiz.questions[quiz.current_index].options.map((opt: string, i: number) => (
+                        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                        {currentQ.options.map((opt: any, i: number) => (
                             <div key={i} className={`p-8 rounded-2xl text-3xl font-bold text-white shadow-2xl ${['bg-red-600', 'bg-blue-600', 'bg-yellow-600', 'bg-green-600'][i % 4]} bg-opacity-90 backdrop-blur-sm border-2 border-white/20`}>
-                                {opt}
+                                {typeof opt === 'string' ? opt : opt.label}
                             </div>
                         ))}
                     </div>
@@ -138,7 +144,7 @@ export default function EmbedPresenterPage({ params }: { params: Promise<{ code:
                         <div 
                             className="h-full bg-white origin-left shadow-[0_0_10px_white]" 
                             /* webhint: ignore inline-styles */
-                            style={{ width: '100%', animation: `width_linear ${quiz.questions[quiz.current_index].time_limit || 30}s linear forwards` }}
+                            style={{ width: '100%', animation: `width_linear ${currentQ.time_limit || 30}s linear forwards` }}
                         ></div>
                     </div>
                 </div>
