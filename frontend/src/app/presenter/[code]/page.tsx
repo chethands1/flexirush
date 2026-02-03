@@ -89,7 +89,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!res.ok) throw new Error(`API Error ${res.status}`);
+      // 404 is common for polling if session is closed, don't throw for it
+      if (!res.ok && res.status !== 404) console.warn(`API Warning: ${res.status} on ${endpoint}`);
+      if (!res.ok) return null;
       return await res.json();
     } catch (err) {
       console.error(`❌ API Failed (${endpoint}):`, err);
@@ -97,9 +99,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
-  // --- SYNC ENGINE (Heartbeat) ---
+  // --- SYNC ENGINE ---
   const syncState = useCallback(async () => {
-      // Throttle: Don't sync if we just clicked a button (prevents UI jumping)
+      // Don't sync if we just clicked a button (prevents jumpiness)
       if (Date.now() - lastActionTime.current < 2000) return;
 
       const data = await apiCall("/state");
@@ -113,31 +115,30 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   // Initial Sync
   useEffect(() => { if(code) syncState(); }, [code, syncState]);
 
-  // Heartbeat (Every 3 seconds)
+  // Heartbeat (Keep alive)
   useEffect(() => {
       if (!code) return;
-      const interval = setInterval(syncState, 3000); 
+      const interval = setInterval(syncState, 2500); 
       return () => clearInterval(interval);
   }, [code, syncState]);
 
 
-  // --- OPTIMISTIC ACTIONS ---
+  // --- ROBUST ACTION HANDLERS ---
   
   const handleOptimisticUpdate = (updateFn: () => void) => {
       lastActionTime.current = Date.now(); // Block external sync temporarily
       updateFn(); // Update UI immediately
   };
 
-  // Wrapper to handle loading states systematically
   const handleAction = async (actionFn: () => Promise<void>) => {
     if (actionLoading) return;
-    setActionLoading(true); // Using state setter here
+    setActionLoading(true);
     try {
         await actionFn();
         await syncState(); 
     } catch (e) {
         console.error(e);
-        alert("Action failed. Check console.");
+        // Don't alert, just log. Alerts freeze the UI.
     } finally {
         setTimeout(() => setActionLoading(false), 500);
     }
@@ -151,7 +152,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const handleNextQuizStep = () => handleAction(async () => {
       if (!quiz) return;
       
-      // Optimistic: Advance UI immediately
+      // OPTIMISTIC UPDATE: Match Backend Logic (Question -> Leaderboard -> Question)
       handleOptimisticUpdate(() => {
           let nextState = quiz.state;
           let nextIndex = quiz.current_index;
@@ -171,10 +172,10 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
           setQuiz({ ...quiz, state: nextState, current_index: nextIndex });
       });
 
-      // Server Sync
       await apiCall("/quiz/next", "POST");
   });
 
+  // ✅ CRITICAL FIX: Use /quiz/reset (matches main.py), NOT /quiz/end
   const handleCloseQuiz = () => handleAction(async () => {
       handleOptimisticUpdate(() => setQuiz(null)); 
       await apiCall("/quiz/reset", "POST");
@@ -199,6 +200,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   };
 
   const handleQuizCreated = () => {
+      // Force sync immediately after creation
       lastActionTime.current = 0; 
       syncState();
   };
@@ -223,11 +225,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         if(res.ok) {
             const data = await res.json();
             setAiSummary(data.summary || "AI couldn't generate a summary.");
-        } else {
-            setAiSummary("AI Service Unavailable.");
         }
     } catch {
-        setAiSummary("Network Error: Could not reach AI service.");
+        setAiSummary("Network Error.");
     } finally {
         setAnalyzing(false);
     }
@@ -252,13 +252,16 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       );
   }
 
-  // --- SAFE DATA ACCESS & NORMALIZATION ---
+  // --- 🛡️ DATA GUARD: PREVENT CRASHES ---
+  // If quiz exists but questions array is empty/missing, this ensures we don't crash
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rawQ: any = (quiz && quiz.questions && quiz.questions[quiz.current_index]) ? quiz.questions[quiz.current_index] : null;
+  const rawQ: any = (quiz && quiz.questions && quiz.questions.length > 0 && quiz.questions[quiz.current_index]) 
+    ? quiz.questions[quiz.current_index] 
+    : null;
   
-  // NORMALIZE: Ensure we always have text and options regardless of what backend sent
+  // Normalize fields to handle AI inconsistencies
   const currentQ = rawQ ? {
-      text: rawQ.text || rawQ.question || "Unknown Question",
+      text: rawQ.text || rawQ.question || "Mystery Question",
       options: rawQ.options || rawQ.answers || [],
       time_limit: rawQ.time_limit || 30
   } : null;
@@ -278,7 +281,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
           </button>
       </div>
 
-      {/* --- DEBUG OVERLAY (THE INSPECTOR) --- */}
+      {/* --- DEBUG OVERLAY --- */}
       {showDebug && (
           <div className="fixed inset-0 bg-black/90 z-50 p-8 overflow-auto font-mono text-xs text-green-400 animate-in fade-in">
               <div className="max-w-4xl mx-auto">
@@ -286,7 +289,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                       <h2 className="text-xl text-white font-bold">🔍 Live Data Inspector</h2>
                       <button onClick={() => setShowDebug(false)} className="bg-red-600 text-white px-4 py-2 rounded font-bold hover:bg-red-500">CLOSE</button>
                   </div>
-                  
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
                           <h3 className="text-yellow-400 font-bold mb-4 text-sm uppercase tracking-wider">Current Quiz State</h3>
@@ -295,11 +297,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                       <div className="space-y-6">
                           <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
                               <h3 className="text-blue-400 font-bold mb-4 text-sm uppercase tracking-wider">Raw Question Data</h3>
-                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(rawQ, null, 2)}</pre>
-                          </div>
-                          <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
-                              <h3 className="text-purple-400 font-bold mb-4 text-sm uppercase tracking-wider">Normalized for UI</h3>
-                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(currentQ, null, 2)}</pre>
+                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(rawQ || "NULL (No Data Found)", null, 2)}</pre>
                           </div>
                       </div>
                   </div>
@@ -400,15 +398,15 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 <>
                                 <div className="mb-8">
                                     <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8 animate-in slide-in-from-right-4 fade-in">
-                                        {/* NORMALIZED TEXT RENDERING */}
                                         {currentQ.text}
                                     </h3>
-                                    <div className="bg-slate-800 h-3 rounded-full overflow-hidden relative w-full">
+                                    <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
                                         <div 
                                             key={quiz.current_index} 
-                                            className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left w-full" 
+                                            className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
                                             /* webhint: ignore inline-styles */
                                             style={{ 
+                                                width: '100%', 
                                                 animation: `width_linear ${currentQ.time_limit}s linear forwards` 
                                             }}
                                         ></div>
@@ -435,14 +433,16 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </div>
                                 </>
                             ) : (
-                                <div className="flex flex-col items-center justify-center text-slate-500 gap-4">
-                                    <div className="w-8 h-8 border-4 border-slate-500 border-t-transparent rounded-full animate-spin"></div>
-                                    <p className="italic">Synchronizing Question Data...</p>
+                                <div className="flex flex-col items-center justify-center text-slate-500 gap-4 py-10">
+                                    {/* SAFETY FALLBACK: If quiz is active but questions missing */}
+                                    <p className="text-xl font-bold text-red-400">⚠️ AI Quiz Generation Failed</p>
+                                    <p className="text-sm">The AI created a quiz session but returned 0 questions.</p>
+                                    <p className="text-xs text-slate-600 font-mono">Raw Question Data: NULL</p>
                                     <button 
-                                        onClick={() => { lastActionTime.current = 0; syncState(); }} 
-                                        className="text-xs bg-slate-800 px-4 py-2 rounded text-white hover:bg-slate-700 transition"
+                                        onClick={handleCloseQuiz} 
+                                        className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded mt-4"
                                     >
-                                        Force Sync 🔄
+                                        Return to Lobby & Try Again
                                     </button>
                                 </div>
                             )}
