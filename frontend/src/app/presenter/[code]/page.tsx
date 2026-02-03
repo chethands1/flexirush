@@ -38,7 +38,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const code = resolvedParams?.code || "";
   const router = useRouter();
 
-  // Connect to Realtime
+  // 1. Connect to Realtime (WebSocket)
   useRealtime(code, "presenter");
 
   const { 
@@ -56,6 +56,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     setQuestions
   } = useSessionStore();
 
+  // Local UI State
   const [showPollForm, setShowPollForm] = useState(false);
   const [showWheel, setShowWheel] = useState(false);
   const [showQuizCreator, setShowQuizCreator] = useState(false);
@@ -69,19 +70,20 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const [analyzing, setAnalyzing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
-  useEffect(() => {
-    if (branding?.logo_url) setTempLogo(branding.logo_url);
-  }, [branding]);
-
+  // --- AUTH CHECK ---
   useEffect(() => {
     if (!token && resolvedParams) router.push("/login");
   }, [token, router, resolvedParams]);
 
-  // --- API HELPER ---
+  // --- BRANDING SYNC ---
+  useEffect(() => {
+    if (branding?.logo_url) setTempLogo(branding.logo_url);
+  }, [branding]);
+
+  // --- ROBUST API CALLER ---
   const apiCall = useCallback(async (endpoint: string, method: "GET" | "POST" = "GET", body?: unknown) => {
     if (!code) return;
     try {
-      // console.log(`📡 API CALL: ${method} ${endpoint}`);
       const res = await fetch(`${API_URL}/api/session/${code}${endpoint}`, {
         method,
         headers: { "Content-Type": "application/json" },
@@ -90,45 +92,53 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       if (!res.ok) throw new Error(`API Error ${res.status}: ${res.statusText}`);
       return await res.json();
     } catch (err) {
-      console.error("❌ API Failed:", err);
-      // Alert user on action failure, but ignore background fetch errors
-      if (method === "POST") alert("Action failed. Check connection.");
+      console.error(`❌ API Failed (${endpoint}):`, err);
       return null;
     }
   }, [code]);
 
-  // --- INITIAL STATE SYNC ---
-  useEffect(() => {
-    if (!code) return;
-    apiCall("/state").then((data) => {
+  // --- DUAL-SYNC ENGINE (The Fix for "Live Delay") ---
+  // Syncs state immediately, then creates a heartbeat to ensure 100% accuracy
+  const syncState = useCallback(async () => {
+      const data = await apiCall("/state");
       if (data) {
         if (data.quiz) setQuiz(data.quiz);
         if (data.current_poll) setPoll(data.current_poll);
         if (data.questions) setQuestions(data.questions);
       }
-    });
-  }, [code, apiCall, setQuiz, setPoll, setQuestions]);
+  }, [apiCall, setQuiz, setPoll, setQuestions]);
 
-  // --- HANDLERS ---
+  // 1. Initial Sync
+  useEffect(() => { if(code) syncState(); }, [code, syncState]);
 
-  // FIX: This now ONLY refreshes state. It does NOT try to start the quiz again.
-  const handleQuizCreated = useCallback(async () => {
-      const data = await apiCall("/state");
-      if (data?.quiz) setQuiz(data.quiz);
-  }, [apiCall, setQuiz]);
+  // 2. Heartbeat Sync (Every 4 seconds) - Guarantees "Best Sync"
+  useEffect(() => {
+      if (!code) return;
+      const interval = setInterval(syncState, 4000); 
+      return () => clearInterval(interval);
+  }, [code, syncState]);
+
+
+  // --- ACTION HANDLERS ---
 
   const handleAction = async (actionFn: () => Promise<void>) => {
     if (actionLoading) return;
     setActionLoading(true);
     await actionFn();
-    setTimeout(() => setActionLoading(false), 500);
+    // Force a sync immediately after any action to update UI instantly
+    await syncState();
+    setTimeout(() => setActionLoading(false), 300);
   };
 
   const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
-  const handleNextQuizStep = () => handleAction(() => apiCall("/quiz/next", "POST"));
   
-  // FIX: Points to /reset to clear the quiz state completely
-  const handleCloseQuiz = () => handleAction(() => apiCall("/quiz/reset", "POST")); 
+  const handleNextQuizStep = () => handleAction(async () => {
+      await apiCall("/quiz/next", "POST");
+  });
+
+  const handleCloseQuiz = () => handleAction(async () => {
+      await apiCall("/quiz/reset", "POST");
+  });
   
   const handleToggleQuestion = (qId: string) => apiCall(`/question/${qId}/toggle`, "POST");
   const handleExport = () => window.location.href = `${API_URL}/api/session/${code}/export`;
@@ -136,6 +146,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const handleBanUser = async (userName: string) => {
     if (!confirm(`Are you sure you want to ban ${userName}?`)) return;
     await apiCall("/ban", "POST", { name: userName });
+    await syncState(); // Immediate refresh
   };
 
   const saveSettings = async () => {
@@ -146,11 +157,19 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     setShowSettings(false);
   };
 
+  // Called by AI Modal on success
+  const handleQuizCreated = () => {
+      // Just sync. The modal already started the quiz on the server.
+      syncState();
+  };
+
+  // --- AI ANALYSIS ---
   const handleAiAnalyze = async () => {
     if (analyzing) return;
     setAnalyzing(true);
     setAiSummary("");
     
+    // 
     let contextData: string[] = [];
     
     if (quiz) {
@@ -188,7 +207,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
             const data = await res.json();
             setAiSummary(data.summary || "AI couldn't generate a summary.");
         } else {
-            setAiSummary("AI Service Temporarily Unavailable.");
+            setAiSummary("AI Service Unavailable.");
         }
     } catch {
         setAiSummary("Network Error: Could not reach AI service.");
@@ -273,11 +292,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     <div className="flex justify-between items-center w-full mb-4 absolute top-4 px-6 z-20">
                         <h2 className="text-sm uppercase tracking-widest text-slate-400 font-bold max-w-[50%] truncate">{quiz.title}</h2>
                         <div className="flex gap-2">
+                            {/* Skip Button: Only show if not ended */}
                             {quiz.state !== "END" && (
                                 <button onClick={handleNextQuizStep} disabled={actionLoading} className="px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-bold transition border border-slate-700">
                                     Skip ⏭
                                 </button>
                             )}
+                            {/* Quit Button: Always available to escape */}
                             <button 
                                 onClick={() => {
                                     if(confirm("Are you sure you want to quit the quiz? Progress will be lost.")) handleCloseQuiz();
@@ -322,6 +343,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                         {currentQ.text || currentQ.question || "Mystery Question"}
                                     </h3>
                                     <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
+                                        {/* Timer Bar */}
                                         <div 
                                             key={quiz.current_index} 
                                             className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
@@ -355,13 +377,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </>
                             ) : (
                                 <div className="flex flex-col items-center justify-center text-slate-500 gap-4">
-                                    <p className="italic">Waiting for question data...</p>
-                                    <button 
-                                        onClick={handleNextQuizStep} 
-                                        className="text-xs bg-slate-800 px-3 py-1 rounded text-slate-300 hover:text-white"
-                                    >
-                                        Force Next ⏭
-                                    </button>
+                                    <div className="w-8 h-8 border-4 border-slate-500 border-t-transparent rounded-full animate-spin"></div>
+                                    <p className="italic">Loading question data...</p>
                                 </div>
                             )}
                         </div>
@@ -397,7 +414,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 disabled={actionLoading}
                                 className="px-8 py-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-lg transition shadow-lg hover:shadow-blue-500/25"
                             >
-                                Next Question →
+                                {actionLoading ? "Loading..." : "Next Question →"}
                             </button>
                         </div>
                     )}
