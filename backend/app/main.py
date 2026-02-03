@@ -6,6 +6,7 @@ import json
 import redis.asyncio as redis
 import os
 from google import genai
+from google.genai import types # Import types for config
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Any
 import random
@@ -19,7 +20,7 @@ import re
 load_dotenv()
 
 # --- GLOBAL MODEL SELECTOR ---
-# Switched to 1.5-flash as default for better JSON stability
+# Gemini 1.5 Flash is best for speed and JSON structure
 ACTIVE_MODEL = "gemini-1.5-flash" 
 client = None
 
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
     if api_key:
         try:
             client = genai.Client(api_key=api_key)
-            print(f"✅ AI Provider initialized. Defaulting to: {ACTIVE_MODEL}")
+            print(f"✅ AI Provider initialized. Using: {ACTIVE_MODEL}")
         except Exception as e:
             print(f"⚠️ AI Init Failed: {e}")
     yield
@@ -321,48 +322,49 @@ async def gen_quiz(req: AIRequest):
     try:
         print(f"🧠 Generating quiz for: {req.prompt}")
         
-        # --- ROBUST AI PROMPT ---
-        prompt = f"""Create a 5-question trivia quiz about "{req.prompt}".
-        Output strict JSON only. No markdown code blocks. No intro text.
-        Structure:
+        # --- ROBUST AI REQUEST (FORCED JSON) ---
+        prompt = f"""You are a helpful AI that generates quiz data in STRICT JSON format.
+        Create a 5-question multiple choice quiz about: "{req.prompt}".
+        
+        The JSON structure must exactly match this:
         {{
           "title": "Quiz Title",
           "questions": [
             {{
-              "text": "Question text?",
+              "text": "Question text here?",
               "options": ["Option A", "Option B", "Option C", "Option D"],
               "correct_index": 0,
               "time_limit": 30
             }}
           ]
-        }}"""
+        }}
+        """
         
-        res = client.models.generate_content(model=ACTIVE_MODEL, contents=prompt)
+        # 1. Force JSON MIME Type (The key fix)
+        res = client.models.generate_content(
+            model=ACTIVE_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        
         txt = res.text.strip()
         
-        # --- JSON CLEANER (Removes Markdown ```json ... ```) ---
-        txt = re.sub(r"^```json\s*", "", txt)  # Remove start block
-        txt = re.sub(r"^```\s*", "", txt)      # Remove start block simple
-        txt = re.sub(r"\s*```$", "", txt)      # Remove end block
-        txt = txt.strip()
-
-        # Try parsing
+        # 2. Parse
         data = json.loads(txt)
         
-        # Validation: Ensure questions exist
+        # 3. Validate
         if "questions" not in data or not data["questions"]:
-            print("⚠️ AI generated empty questions list.")
+            print("⚠️ AI generated valid JSON but empty questions.")
             return {"title": "Error", "questions": []}
             
         print(f"✅ Generated {len(data['questions'])} questions.")
         return data
 
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON Parse Error: {e}")
-        print(f"❌ Raw Output: {txt}") # Log the raw bad output for debugging
-        return {"title": "AI Error", "questions": []}
     except Exception as e:
-        print(f"❌ General AI Error: {e}")
+        print(f"❌ AI Error: {e}")
+        # Return empty so the frontend knows to show the error message
         return {"title": "AI Error", "questions": []}
 
 @app.post("/api/session/{code}/branding")
@@ -373,11 +375,11 @@ async def brand(code: str, req: BrandingRequest):
     await manager.broadcast(code, {"type": "BRANDING_UPDATE", "payload": data['branding']})
     return {"status": "ok"}
 
-# --- QUIZ ENDPOINTS (SECURED) ---
+# --- QUIZ ENDPOINTS ---
 
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
-    # --- 🛡️ FIREWALL ---
+    # --- FIREWALL ---
     if not quiz.questions or len(quiz.questions) == 0:
         print(f"⚠️ Blocked empty quiz for session {code}")
         raise HTTPException(status_code=400, detail="No questions generated.")
