@@ -69,7 +69,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const [aiSummary, setAiSummary] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
-  const [lastSync, setLastSync] = useState<Date>(new Date());
+  const [lastSync, setLastSync] = useState<string>("Never");
+  const [showDebug, setShowDebug] = useState(false); // Toggle for raw data view
 
   // --- AUTH CHECK ---
   useEffect(() => {
@@ -98,42 +99,43 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
-  // --- TURBO-SYNC ENGINE (1s Heartbeat) ---
+  // --- SYNC ENGINE ---
   const syncState = useCallback(async () => {
       const data = await apiCall("/state");
       if (data) {
+        // Only update if data exists to prevent clearing state on bad fetch
         if (data.quiz) setQuiz(data.quiz);
         if (data.current_poll) setPoll(data.current_poll);
         if (data.questions) setQuestions(data.questions);
-        setLastSync(new Date());
+        setLastSync(new Date().toLocaleTimeString());
       }
   }, [apiCall, setQuiz, setPoll, setQuestions]);
 
   // 1. Initial Sync
   useEffect(() => { if(code) syncState(); }, [code, syncState]);
 
-  // 2. High-Frequency Heartbeat (1s) - Ensures "Live" feel
+  // 2. Heartbeat (3s) - Keeps UI alive even if WS drops
   useEffect(() => {
       if (!code) return;
-      const interval = setInterval(syncState, 1000); 
+      const interval = setInterval(syncState, 3000); 
       return () => clearInterval(interval);
   }, [code, syncState]);
 
 
-  // --- ACTION HANDLERS ---
+  // --- ACTION HANDLERS (Unbreakable) ---
 
   const handleAction = async (actionFn: () => Promise<void>) => {
     if (actionLoading) return;
     setActionLoading(true);
     try {
         await actionFn();
-        // Force a double-tap sync to ensure UI updates instantly
-        await syncState();
-        setTimeout(() => syncState(), 500); 
+        await syncState(); // Immediate update
     } catch (e) {
         console.error("Action failed", e);
+        alert("Command failed. Please try again.");
     } finally {
-        setTimeout(() => setActionLoading(false), 300);
+        // ALWAYS unlock buttons
+        setActionLoading(false);
     }
   };
 
@@ -164,9 +166,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     setShowSettings(false);
   };
 
-  // Called by AI Modal on success
   const handleQuizCreated = () => {
-      // Just sync. The modal already started the quiz on the server.
       syncState();
   };
 
@@ -176,7 +176,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     setAnalyzing(true);
     setAiSummary("");
     
-    // 
     let contextData: string[] = [];
     
     if (quiz) {
@@ -242,7 +241,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       );
   }
 
-  // --- SAFE QUIZ DATA ACCESS ---
+  // --- SAFE DATA ACCESS ---
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const currentQ: any = (quiz && quiz.questions && quiz.questions[quiz.current_index]) ? quiz.questions[quiz.current_index] : null;
 
@@ -292,6 +291,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         {!isSidebar && (
             <div className="lg:col-span-2 bg-slate-900/50 backdrop-blur-sm p-4 sm:p-8 rounded-2xl border border-slate-800 flex flex-col shadow-2xl relative overflow-y-auto custom-scrollbar min-h-[60vh]">
             
+            {/* DEBUGGER TOGGLE (Click to see raw data if stuck) */}
+            <div className="absolute bottom-2 left-2 z-50 opacity-20 hover:opacity-100 transition">
+                <button onClick={() => setShowDebug(!showDebug)} className="text-[10px] text-slate-500">🛠️ Debug</button>
+            </div>
+            {showDebug && (
+                <div className="absolute inset-0 bg-black/90 p-4 z-40 overflow-auto text-xs font-mono text-green-400">
+                    <pre>{JSON.stringify({ quiz, currentPoll, questions }, null, 2)}</pre>
+                    <button onClick={() => setShowDebug(false)} className="mt-4 bg-red-600 px-4 py-2 rounded text-white">Close Debugger</button>
+                </div>
+            )}
+
             {quiz ? (
                 <div className="flex flex-col h-full items-center justify-center text-center w-full animate-in fade-in zoom-in duration-300">
                     
@@ -299,13 +309,11 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     <div className="flex justify-between items-center w-full mb-4 absolute top-4 px-6 z-20">
                         <h2 className="text-sm uppercase tracking-widest text-slate-400 font-bold max-w-[50%] truncate">{quiz.title}</h2>
                         <div className="flex gap-2">
-                            {/* Skip Button: Only show if not ended */}
                             {quiz.state !== "END" && (
                                 <button onClick={handleNextQuizStep} disabled={actionLoading} className="px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-bold transition border border-slate-700">
                                     Skip ⏭
                                 </button>
                             )}
-                            {/* Quit Button: Always available to escape */}
                             <button 
                                 onClick={() => {
                                     if(confirm("Are you sure you want to quit the quiz? Progress will be lost.")) handleCloseQuiz();
@@ -346,11 +354,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 <>
                                 <div className="mb-8">
                                     <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8 animate-in slide-in-from-right-4 fade-in">
-                                        {/* SYSTEMATIC FIX: Handle both possible AI field names */}
                                         {currentQ.text || currentQ.question || "Mystery Question"}
                                     </h3>
                                     <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
-                                        {/* Timer Bar */}
                                         <div 
                                             key={quiz.current_index} 
                                             className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
@@ -386,7 +392,12 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 <div className="flex flex-col items-center justify-center text-slate-500 gap-4">
                                     <div className="w-8 h-8 border-4 border-slate-500 border-t-transparent rounded-full animate-spin"></div>
                                     <p className="italic">Synchronizing Question Data...</p>
-                                    <button onClick={syncState} className="text-xs text-blue-400 hover:underline">Force Refresh</button>
+                                    <button 
+                                        onClick={syncState} 
+                                        className="text-xs bg-slate-800 px-4 py-2 rounded text-white hover:bg-slate-700 transition"
+                                    >
+                                        Force Sync 🔄
+                                    </button>
                                 </div>
                             )}
                         </div>
@@ -794,7 +805,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       {/* --- DEBUG BAR (Hidden in Sidebar) --- */}
       {!isSidebar && (
           <div className="fixed bottom-1 left-1 text-[10px] text-slate-700 font-mono select-none pointer-events-none opacity-50">
-              Synced: {lastSync.toLocaleTimeString()} | WS: {isConnected ? "OK" : "ERR"}
+              Last Sync: {lastSync} | WS: {isConnected ? "OK" : "ERR"}
           </div>
       )}
 
