@@ -97,16 +97,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
-  // --- SYNC ENGINE ---
+  // --- SYNC ENGINE (Fixed for Null States) ---
   const syncState = useCallback(async () => {
       // Don't sync if we just clicked a button (prevents jumpiness)
       if (Date.now() - lastActionTime.current < 2000) return;
 
       const data = await apiCall("/state");
       if (data) {
-        if (data.quiz) setQuiz(data.quiz);
-        if (data.current_poll) setPoll(data.current_poll);
-        if (data.questions) setQuestions(data.questions);
+        // CRITICAL FIX: Explicitly handle null/undefined to clear state
+        setQuiz(data.quiz || null);
+        setPoll(data.current_poll || null);
+        setQuestions(data.questions || []);
       }
   }, [apiCall, setQuiz, setPoll, setQuestions]);
 
@@ -179,10 +180,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   
   // --- 🛡️ AUTO-KILL SWITCH ---
   // If the AI creates a bad quiz (0 questions), this deletes it instantly
-  // so the Join page doesn't crash.
   useEffect(() => {
       if (quiz && (!quiz.questions || quiz.questions.length === 0)) {
-          console.error("⚠️ EMPTY QUIZ DETECTED. AUTO-RESETTING TO SAVE JOIN PAGE.");
+          console.error("⚠️ EMPTY QUIZ DETECTED. AUTO-RESETTING TO SAVE DASHBOARD.");
           handleCloseQuiz();
       }
   }, [quiz, handleCloseQuiz]);
@@ -294,12 +294,12 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
                           <h3 className="text-yellow-400 font-bold mb-4 text-sm uppercase tracking-wider">Current Quiz State</h3>
-                          <pre className="whitespace-pre-wrap break-words">{JSON.stringify(quiz, null, 2)}</pre>
+                          <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(quiz, null, 2)}</pre>
                       </div>
                       <div className="space-y-6">
                           <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
                               <h3 className="text-blue-400 font-bold mb-4 text-sm uppercase tracking-wider">Raw Question Data</h3>
-                              <pre className="whitespace-pre-wrap break-words">{JSON.stringify(rawQ || "NULL (No Data Found)", null, 2)}</pre>
+                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(rawQ || "NULL (No Data Found)", null, 2)}</pre>
                           </div>
                       </div>
                   </div>
@@ -324,7 +324,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                 FR
                 </div>
             )}
-            <h1 className="hidden sm:block text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">
+            <h1 className="hidden sm:block text-2xl font-bold bg-clip-text text-transparent bg-linear-to-r from-white to-slate-400">
                 FlexiRush Presenter
             </h1>
             </div>
@@ -375,7 +375,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: LOBBY */}
                     {quiz.state === "LOBBY" && (
                         <div className="space-y-8">
-                            <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-600">
+                            <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-blue-400 to-purple-600">
                                 Get Ready!
                             </h1>
                             <div className="text-2xl text-white bg-slate-800/80 px-8 py-3 rounded-full inline-block border border-slate-700">
@@ -405,7 +405,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
                                         <div 
                                             key={quiz.current_index} 
-                                            className="h-full bg-gradient-to-r from-green-500 to-yellow-500 origin-left" 
+                                            className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
                                             /* webhint: ignore inline-styles */
                                             style={{ 
                                                 width: '100%', 
@@ -492,7 +492,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: END */}
                     {quiz.state === "END" && (
                         <div className="space-y-8 animate-in zoom-in duration-500 pt-12">
-                            <h1 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500 drop-shadow-sm">
+                            <h1 className="text-6xl font-black text-transparent bg-clip-text bg-linear-to-r from-yellow-400 to-orange-500 drop-shadow-sm">
                                 GAME OVER
                             </h1>
                             <div className="bg-slate-800/80 p-10 rounded-3xl border border-yellow-500/30 shadow-[0_0_30px_rgba(234,179,8,0.2)]">
@@ -569,7 +569,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         {currentPoll.type === "rating" && (
                         <div className="flex flex-col items-center justify-center py-12">
                             <div className="relative">
-                                <div className="text-8xl font-black text-transparent bg-clip-text bg-gradient-to-br from-yellow-300 to-yellow-600 flex items-baseline gap-2">
+                                <div className="text-8xl font-black text-transparent bg-clip-text bg-linear-to-br from-yellow-300 to-yellow-600 flex items-baseline gap-2">
                                     {currentPoll.average || 0.0} 
                                 </div>
                             </div>
@@ -725,7 +725,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                   </button>
                   <button
                     onClick={() => setShowAIModal(true)}
-                    className="p-3 bg-gradient-to-br from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold rounded-lg transition flex flex-col items-center justify-center gap-1 shadow-lg active:scale-[0.98]"
+                    className="p-3 bg-linear-to-br from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold rounded-lg transition flex flex-col items-center justify-center gap-1 shadow-lg active:scale-[0.98]"
                   >
                     <span className="text-xl">✨</span>
                     <span className="text-xs">AI Quiz</span>
@@ -829,7 +829,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
               <button 
                 onClick={handleAiAnalyze} 
                 disabled={analyzing} 
-                className="w-full p-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl transition text-left border border-indigo-400/30 flex justify-between items-center shadow-lg active:scale-[0.98]"
+                className="w-full p-4 bg-linear-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl transition text-left border border-indigo-400/30 flex justify-between items-center shadow-lg active:scale-[0.98]"
               >
                 <div className="flex flex-col">
                     <span className="text-sm">Analyze Room Vibe</span>

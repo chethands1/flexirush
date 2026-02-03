@@ -1,388 +1,297 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import dynamic from "next/dynamic";
-import { useSessionStore } from "@/store/sessionStore";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import Image from "next/image";
+import { useRouter } from "next/navigation";
+import { useSessionStore } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
-import { api } from "@/lib/api";
 
-// Dynamic import for the reaction overlay
-const ReactionOverlay = dynamic(() => import("@/components/ReactionOverlay"), { ssr: false });
-
+// --- CONFIGURATION ---
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 
-// --- TYPES (Fixes 'any' errors) ---
-interface Question {
-  id: string;
-  text: string;
-  votes: number;
-  visible?: boolean;
-}
-
-interface PollOption {
-  label: string;
-}
-
-interface Poll {
-  type: string;
-  question: string;
-  options?: PollOption[];
-}
-
-interface QuizQuestion {
-  options: string[];
-}
-
-interface Quiz {
-  state: string;
-  current_index: number;
-  questions: QuizQuestion[];
-}
-
-// === MAIN COMPONENT ===
-export default function AudiencePage({ params }: { params: Promise<{ code: string }> }) {
+export default function JoinPage({ params }: { params: Promise<{ code: string }> }) {
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
-  
+  const [hasVoted, setHasVoted] = useState(false);
+  const [selectedOption, setSelectedOption] = useState<number | null>(null);
+  const [pollAnswer, setPollAnswer] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   useEffect(() => {
     params.then(setResolvedParams);
   }, [params]);
 
   const code = resolvedParams?.code || "";
-  
-  // Store State
-  const { currentPoll, questions, isConnected, quiz, branding, participants } = useSessionStore();
-  
-  // Local State
-  const [name, setName] = useState("");
-  const [isJoined, setIsJoined] = useState(false);
-  const [activeTab, setActiveTab] = useState<"poll" | "qna">("poll");
-  const [newQuestion, setNewQuestion] = useState("");
-  const [errorMsg, setErrorMsg] = useState(""); 
+  const router = useRouter();
 
-  // --- HOOK: REALTIME CONNECTION ---
-  useRealtime(code, isJoined ? name : null);
+  // 1. Connect to Realtime
+  useRealtime(code, "participant");
 
-  const handleJoin = async () => {
-    if (!name.trim()) return;
-    setErrorMsg("");
-    
-    try {
-        await api.joinSession(code, name);
-        setIsJoined(true);
-    } catch (err: unknown) {
-        console.error(err);
-        if (err instanceof Error) {
-            setErrorMsg(err.message || "Session not found or connection failed.");
-        } else {
-            setErrorMsg("An unexpected error occurred.");
-        }
+  const { 
+    user,
+    token,
+    isConnected,
+    currentPoll,
+    quiz,
+    quizScores,
+    branding
+  } = useSessionStore();
+
+  // --- AUTH CHECK ---
+  useEffect(() => {
+    if (!user || !token) {
+        router.push(`/login?redirect=/join/${code}`);
     }
+  }, [user, token, router, code]);
+
+  // --- RESET STATE ON CHANGE ---
+  useEffect(() => {
+      setHasVoted(false);
+      setSelectedOption(null);
+      setPollAnswer("");
+  }, [currentPoll?.question, quiz?.current_index, quiz?.state]);
+
+  // --- API HELPER ---
+  const apiCall = useCallback(async (endpoint: string, body?: unknown) => {
+    if (!code) return;
+    try {
+      setIsSubmitting(true);
+      const res = await fetch(`${API_URL}/api/session/${code}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (res.ok) setHasVoted(true);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [code]);
+
+  // --- HANDLERS ---
+  const handlePollVote = (value: string | number) => {
+      if (hasVoted) return;
+      apiCall("/vote", { value });
   };
 
-  const handleAsk = async () => {
-      if(!newQuestion.trim()) return;
-      try {
-        await api.postQuestion(code, newQuestion);
-        setNewQuestion("");
-      } catch (e) {
-        console.error("Failed to post question", e);
-      }
+  const handleQuizAnswer = (index: number) => {
+      if (hasVoted || !user) return;
+      setSelectedOption(index);
+      apiCall("/quiz/answer", { 
+          user_name: user.email || "Anonymous", 
+          option_index: index 
+      });
   };
 
-  const handleUpvote = async (qId: string) => {
-      try {
-        await api.upvoteQuestion(code, qId);
-      } catch (e) {
-        console.error("Failed to upvote", e);
-      }
-  };
-
-  const sendReaction = (emoji: string) => {
-      fetch(`${API_URL}/api/session/${code}/react`, {
-          method: "POST", 
-          headers: {"Content-Type": "application/json"}, 
-          body: JSON.stringify({ emoji })
-      }).catch(err => console.error("Reaction failed", err));
-  };
-
-  // --- RENDER: LOADING ---
-  if (!code) return <div className="text-white text-center pt-20">Loading...</div>;
-
-  // --- RENDER: LOGIN SCREEN ---
-  if (!isJoined) {
-    return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-white">
-        <div className="w-full max-w-sm bg-slate-900 p-8 rounded-2xl border border-slate-800 shadow-2xl">
-          {branding?.logo_url && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={branding.logo_url} alt="Logo" className="w-16 h-16 mx-auto mb-4 object-contain rounded" />
-          )}
-          <h1 className="text-2xl font-bold text-center mb-6">Join Session: {code}</h1>
-          
-          <input 
-            className="w-full bg-slate-800 p-4 rounded-xl text-white mb-4 border border-slate-700 focus:border-blue-500 outline-none" 
-            placeholder="Your Name" 
-            value={name} 
-            onChange={e => setName(e.target.value)} 
-            onKeyDown={e => e.key === 'Enter' && handleJoin()}
-          />
-          
-          {errorMsg && (
-            <p className="text-red-400 text-sm mb-4 text-center bg-red-900/20 p-2 rounded border border-red-900/50">
-                {errorMsg}
-            </p>
-          )}
-
-          <button onClick={handleJoin} className="w-full py-4 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold transition">
-            Enter Room
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // --- RENDER: QUIZ MODE (Overrides Dashboard) ---
-  if (quiz && (quiz as Quiz).state !== 'END') {
-      return <QuizView quiz={quiz as Quiz} code={code} name={name} />;
-  }
-
-  // Cast questions safely to avoid 'any' errors in map/filter
-  const safeQuestions = (questions as Question[]) || [];
-
-  // --- RENDER: MAIN DASHBOARD ---
-  return (
-    <div className="min-h-screen bg-slate-950 text-white p-6 flex flex-col items-center relative overflow-hidden pb-24">
-      <ReactionOverlay />
+  // --- 🛡️ SAFETY SHIELD: PREVENTS CRASHES ---
+  // MOVED UP to fix "Hook Order" error
+  const safeQuizQuestion = useMemo(() => {
+      if (!quiz || !quiz.questions || quiz.questions.length === 0) return null;
       
-      {/* Header Info Bar */}
-      <div className="w-full max-w-md flex justify-between text-xs text-slate-500 mb-4 font-bold uppercase tracking-widest">
-         <div className="flex items-center gap-2">
-             {branding?.logo_url && (
-                 // eslint-disable-next-line @next/next/no-img-element
-                 <img src={branding.logo_url} alt="Logo" className="w-5 h-5 rounded" />
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const q = quiz.questions[quiz.current_index] as any;
+      if (!q) return null;
+      
+      // Normalize data to handle AI inconsistencies
+      return {
+          text: q.text || q.question || "Question Loading...",
+          options: q.options || q.answers || [],
+          time_limit: q.time_limit || 30
+      };
+  }, [quiz]);
+
+  if (!resolvedParams || !user) {
+      return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">Loading...</div>;
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col">
+      
+      {/* --- HEADER --- */}
+      <header className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 backdrop-blur-md sticky top-0 z-10">
+          <div className="flex items-center gap-2">
+             {branding?.logo_url ? (
+                 <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded" />
+             ) : (
+                 <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold">FR</div>
              )}
-             <span>{name}</span>
-         </div>
-         <div className="flex items-center gap-2">
-             <span className="bg-slate-900 px-2 py-1 rounded">👥 {participants.length}</span>
-             <span className={isConnected ? "text-green-500" : "text-red-500"}>
-                ● {isConnected ? "Live" : "Reconnecting"}
-             </span>
-         </div>
-      </div>
+             <span className="font-bold hidden sm:block">FlexiRush</span>
+          </div>
+          <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500 shadow-[0_0_8px_#22c55e]" : "bg-red-500"}`}></div>
+              <span className="font-mono bg-slate-800 px-2 py-1 rounded text-xs border border-slate-700">{code}</span>
+          </div>
+      </header>
 
-      {/* Tab Switcher */}
-      <div className="w-full max-w-md flex bg-slate-900 rounded-lg p-1 mb-6 border border-slate-800">
-        <button 
-            onClick={() => setActiveTab("poll")} 
-            className={`flex-1 py-2 rounded font-bold transition ${activeTab==='poll' ? "bg-blue-600 text-white shadow" : "text-slate-400"}`}
-        >
-            Interactions
-        </button>
-        <button 
-            onClick={() => setActiveTab("qna")} 
-            className={`flex-1 py-2 rounded font-bold transition ${activeTab==='qna' ? "bg-purple-600 text-white shadow" : "text-slate-400"}`}
-        >
-            Q&A
-        </button>
-      </div>
+      {/* --- MAIN CONTENT --- */}
+      <main className="flex-1 flex flex-col p-4 max-w-md mx-auto w-full justify-center">
+            
+            {/* SCENARIO 1: QUIZ ACTIVE */}
+            {quiz && quiz.state !== "END" && (
+                <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
+                    <div className="text-center mb-6">
+                        <span className="bg-purple-900/30 text-purple-300 text-xs font-bold px-3 py-1 rounded-full border border-purple-500/30 uppercase tracking-widest">
+                            {quiz.state === "LOBBY" ? "Quiz Lobby" : `Question ${quiz.current_index + 1}`}
+                        </span>
+                    </div>
 
-      {/* Main Content Area */}
-      <div className="w-full max-w-md flex-1">
-        {activeTab === 'poll' ? (
-            !currentPoll ? (
-                <div className="text-center py-20 bg-slate-900/50 rounded-2xl border border-slate-800 animate-pulse">
-                    <h3 className="text-lg font-bold text-slate-400">Waiting for presenter...</h3>
-                    <div className="text-4xl mt-2">☕</div>
-                </div>
-            ) : (
-                <PollView poll={currentPoll as Poll} code={code} />
-            )
-        ) : (
-            <div className="flex flex-col h-[60vh]">
-                <div className="flex-1 overflow-y-auto space-y-3 mb-4 pr-1 custom-scrollbar">
-                    {safeQuestions.filter(q => q.visible !== false).length === 0 && (
-                        <div className="text-center text-slate-500 py-10">No questions yet.</div>
+                    {quiz.state === "LOBBY" && (
+                        <div className="text-center py-10">
+                            <h1 className="text-4xl font-black text-transparent bg-clip-text bg-linear-to-br from-purple-400 to-pink-600 mb-4">
+                                Get Ready!
+                            </h1>
+                            <p className="text-slate-400">The quiz will start soon.</p>
+                            <div className="mt-8 text-6xl animate-bounce">🚀</div>
+                        </div>
                     )}
-                    {safeQuestions
-                        .filter(q => q.visible !== false)
-                        .sort((a, b) => b.votes - a.votes)
-                        .map((q) => (
-                        <div key={q.id} className="bg-slate-900 p-4 rounded-xl border border-slate-800 flex justify-between gap-3">
-                            <p className="text-sm text-slate-300">{q.text}</p>
-                            <button onClick={() => handleUpvote(q.id)} className="flex flex-col items-center bg-slate-800 px-3 rounded hover:bg-slate-700 transition">
-                                <span className="text-blue-400 font-bold">▲</span>
-                                <span className="text-xs">{q.votes}</span>
+
+                    {quiz.state === "QUESTION" && (
+                        safeQuizQuestion ? (
+                            <div className="space-y-6">
+                                <h2 className="text-2xl font-bold text-center leading-snug">
+                                    {safeQuizQuestion.text}
+                                </h2>
+                                
+                                {/* Timer Bar */}
+                                <div className="h-2 bg-slate-800 rounded-full overflow-hidden w-full">
+                                    <div 
+                                        key={quiz.current_index}
+                                        className="h-full bg-purple-500 origin-left"
+                                        /* webhint: ignore inline-styles */
+                                        style={{ animation: `width_linear ${safeQuizQuestion.time_limit}s linear forwards`, width: '100%' }}
+                                    ></div>
+                                </div>
+
+                                <div className="grid gap-3">
+                                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                                    {safeQuizQuestion.options.map((opt: any, i: number) => (
+                                        <button
+                                            key={i}
+                                            disabled={hasVoted || isSubmitting}
+                                            onClick={() => handleQuizAnswer(i)}
+                                            className={`p-4 rounded-xl text-lg font-bold transition-all transform active:scale-95 flex items-center gap-3 text-left border-2
+                                                ${hasVoted 
+                                                    ? (selectedOption === i 
+                                                        ? "bg-purple-600 border-purple-500 text-white shadow-[0_0_15px_rgba(147,51,234,0.5)]" 
+                                                        : "bg-slate-800 border-slate-700 text-slate-500 opacity-50")
+                                                    : "bg-slate-800 border-slate-700 hover:border-purple-500 hover:bg-slate-750 text-slate-200"
+                                                }
+                                            `}
+                                        >
+                                            <span className="w-8 h-8 rounded-full bg-black/20 flex items-center justify-center text-sm">
+                                                {['A','B','C','D'][i]}
+                                            </span>
+                                            {typeof opt === 'string' ? opt : opt.label}
+                                        </button>
+                                    ))}
+                                </div>
+                                {hasVoted && <p className="text-center text-green-400 font-bold animate-pulse">Answer Sent! 🔒</p>}
+                            </div>
+                        ) : (
+                            // 🛡️ FALLBACK: Shows this instead of crashing
+                            <div className="text-center py-12 text-slate-500 animate-pulse">
+                                <div className="text-4xl mb-4">⏳</div>
+                                <p>Waiting for question...</p>
+                            </div>
+                        )
+                    )}
+
+                    {quiz.state === "LEADERBOARD" && (
+                        <div className="text-center py-10 space-y-6">
+                            <h2 className="text-3xl font-bold text-yellow-400">Time&apos;s Up!</h2>
+                            <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
+                                <p className="text-slate-400 text-sm uppercase tracking-widest mb-2">Your Score</p>
+                                <p className="text-5xl font-mono font-bold text-white">
+                                    {quizScores[user.email || "Anonymous"] || 0}
+                                </p>
+                            </div>
+                            <p className="text-slate-500 text-sm">Check the main screen for rankings</p>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* SCENARIO 2: POLL ACTIVE */}
+            {!quiz && currentPoll && (
+                <div className="w-full space-y-6 animate-in fade-in zoom-in duration-300">
+                    <div className="text-center mb-4">
+                        <span className="bg-blue-900/30 text-blue-300 text-xs font-bold px-3 py-1 rounded-full border border-blue-500/30 uppercase">
+                            Live Poll
+                        </span>
+                    </div>
+                    <h2 className="text-2xl font-bold text-center">{currentPoll.question}</h2>
+
+                    {currentPoll.type === "multiple_choice" && (
+                        <div className="grid gap-3">
+                            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                            {currentPoll.options?.map((opt: any, i: number) => (
+                                <button
+                                    key={i}
+                                    onClick={() => handlePollVote(opt.label)}
+                                    disabled={hasVoted}
+                                    className={`p-4 rounded-xl font-bold text-left transition-all ${
+                                        hasVoted 
+                                        ? "bg-slate-800 text-slate-500 cursor-not-allowed" 
+                                        : "bg-blue-600 hover:bg-blue-500 text-white shadow-lg active:scale-95"
+                                    }`}
+                                >
+                                    {opt.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {(currentPoll.type === "word_cloud" || currentPoll.type === "open_ended") && (
+                        <div className="space-y-4">
+                            <input 
+                                value={pollAnswer}
+                                onChange={(e) => setPollAnswer(e.target.value)}
+                                placeholder="Type your answer..."
+                                className="w-full p-4 bg-slate-800 border border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-white placeholder:text-slate-500"
+                                disabled={hasVoted}
+                            />
+                            <button
+                                onClick={() => handlePollVote(pollAnswer)}
+                                disabled={!pollAnswer.trim() || hasVoted}
+                                className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold rounded-xl transition"
+                            >
+                                {hasVoted ? "Sent!" : "Submit"}
                             </button>
                         </div>
-                    ))}
-                </div>
-                <div className="flex gap-2">
-                    <input 
-                        className="flex-1 bg-slate-900 border border-slate-700 p-3 rounded-lg text-white outline-none focus:ring-2 focus:ring-purple-500" 
-                        value={newQuestion} 
-                        onChange={e=>setNewQuestion(e.target.value)} 
-                        placeholder="Ask a question..." 
-                        onKeyDown={e => e.key === 'Enter' && handleAsk()}
-                    />
-                    <button onClick={handleAsk} className="bg-purple-600 hover:bg-purple-500 px-4 rounded-lg font-bold transition">Send</button>
-                </div>
-            </div>
-        )}
-      </div>
+                    )}
 
-      {/* Floating Reactions Footer */}
-      <div className="fixed bottom-6 flex gap-3 bg-slate-900/90 p-3 rounded-full border border-slate-700 shadow-2xl backdrop-blur-md z-50">
-          {["❤️", "🔥", "👏", "🎉"].map(e => (
-              <button key={e} onClick={() => sendReaction(e)} className="text-2xl hover:scale-125 transition active:scale-90">{e}</button>
-          ))}
-      </div>
+                    {currentPoll.type === "rating" && (
+                        <div className="flex justify-center gap-2 py-8">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                                <button
+                                    key={star}
+                                    onClick={() => handlePollVote(star)}
+                                    disabled={hasVoted}
+                                    className={`text-4xl transition-transform hover:scale-125 ${hasVoted ? "opacity-50 cursor-default" : "cursor-pointer"}`}
+                                >
+                                    ★
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* SCENARIO 3: IDLE / END */}
+            {!quiz && !currentPoll && (
+                <div className="text-center py-20 text-slate-500 animate-pulse">
+                    <div className="text-6xl mb-6 grayscale opacity-20">☕</div>
+                    <h2 className="text-xl font-bold text-slate-300 mb-2">Waiting for Presenter</h2>
+                    <p className="text-sm">Sit back and relax!</p>
+                </div>
+            )}
+
+      </main>
+
+      {/* --- FOOTER INFO --- */}
+      <footer className="p-4 text-center text-[10px] text-slate-600">
+          Logged in as <span className="text-slate-400 font-bold">{user.email || "Guest"}</span>
+      </footer>
     </div>
   );
-}
-
-// === SUB-COMPONENT: QUIZ VIEW ===
-function QuizView({ quiz, code, name }: { quiz: Quiz, code: string, name: string }) {
-    const [answered, setAnswered] = useState(false);
-
-    const submitAnswer = async (index: number) => {
-        if(answered) return;
-        setAnswered(true);
-        try {
-            await api.submitQuizAnswer(code, name, index);
-        } catch (e) {
-            console.error("Quiz submission failed", e);
-        }
-    };
-
-    if (quiz.state === "LOBBY") {
-        return (
-            <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 text-center">
-                <h1 className="text-4xl font-bold mb-4 animate-pulse">Get Ready!</h1>
-                <p className="text-xl text-slate-400">Quiz starting soon...</p>
-                <div className="mt-8 text-6xl">🚀</div>
-            </div>
-        );
-    }
-    
-    if (quiz.state === "LEADERBOARD") {
-        return (
-            <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 text-center">
-                <h2 className="text-3xl font-bold mb-4 text-yellow-400">Time&apos;s Up!</h2>
-                <p className="text-slate-400">Look at the main screen for results.</p>
-                {answered && <div className="mt-4 px-4 py-2 bg-slate-800 rounded text-green-400">Answer Submitted</div>}
-            </div>
-        );
-    }
-
-    return (
-        <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center pt-20 p-6">
-            <div className="mb-8">
-                <span className="bg-slate-800 px-4 py-2 rounded-full text-sm font-bold text-slate-300 border border-slate-700">
-                    Question {quiz.current_index + 1} / {quiz.questions.length}
-                </span>
-            </div>
-            {answered ? (
-                <div className="text-center py-20 bg-slate-900 rounded-2xl border border-slate-800 w-full max-w-md animate-fade-in">
-                    <h2 className="text-2xl font-bold mb-2 text-green-400">Answer Sent!</h2>
-                    <p className="text-slate-400">Waiting for others...</p>
-                </div>
-            ) : (
-                <div className="grid grid-cols-2 gap-4 w-full max-w-md h-[50vh]">
-                    {quiz.questions[quiz.current_index].options.map((_, i) => (
-                        <button 
-                            key={i} 
-                            onClick={() => submitAnswer(i)} 
-                            className={`rounded-2xl shadow-lg transition active:scale-95 flex items-center justify-center text-4xl font-bold text-white border-b-4 border-black/20 ${
-                                ['bg-red-600 hover:bg-red-500', 'bg-blue-600 hover:bg-blue-500', 'bg-yellow-600 hover:bg-yellow-500', 'bg-green-600 hover:bg-green-500'][i]
-                            }`}
-                        >
-                            {['▲', '◆', '●', '■'][i]}
-                        </button>
-                    ))}
-                </div>
-            )}
-        </div>
-    );
-}
-
-// === SUB-COMPONENT: POLL VIEW ===
-function PollView({ poll, code }: { poll: Poll, code: string }) {
-    const [hasVoted, setHasVoted] = useState(false);
-    const [textInput, setTextInput] = useState("");
-
-    const handleVote = async (value: string | number) => {
-        if (hasVoted && poll.type !== "word_cloud" && poll.type !== "open_ended") return;
-        
-        if (poll.type !== "word_cloud" && poll.type !== "open_ended") setHasVoted(true);
-        
-        try {
-            await api.vote(code, value);
-        } catch (e) {
-            console.error("Voting failed", e);
-        }
-        
-        if (poll.type === "word_cloud" || poll.type === "open_ended") setTextInput("");
-    };
-
-    return (
-        <div className="bg-slate-900 p-6 rounded-2xl border border-slate-800 animate-slide-up shadow-xl">
-            <h2 className="text-xl font-bold mb-6 text-white text-center">{poll.question}</h2>
-            
-            {poll.type === "multiple_choice" && (
-                <div className="space-y-3">
-                    {poll.options?.map((opt, idx) => (
-                        <button 
-                            key={idx} 
-                            onClick={() => handleVote(idx)} 
-                            disabled={hasVoted} 
-                            className={`w-full p-4 text-left rounded-xl font-bold transition-all flex justify-between items-center ${
-                                hasVoted ? "bg-slate-800 text-slate-500 border border-slate-700" : "bg-blue-600 hover:bg-blue-500 text-white shadow-lg active:scale-95"
-                            }`}
-                        >
-                            <span>{opt.label}</span>
-                            {hasVoted && <span>✔️</span>}
-                        </button>
-                    ))}
-                </div>
-            )}
-
-            {poll.type === "rating" && (
-                <div className="flex justify-center gap-2 py-4">
-                    {[1, 2, 3, 4, 5].map(star => (
-                        <button 
-                            key={star} 
-                            onClick={() => handleVote(star)} 
-                            className="text-4xl sm:text-5xl hover:scale-110 active:scale-90 transition grayscale hover:grayscale-0"
-                        >
-                            ⭐
-                        </button>
-                    ))}
-                </div>
-            )}
-
-            {(poll.type === "word_cloud" || poll.type === "open_ended") && (
-                <div className="flex flex-col gap-3">
-                    <div className="flex gap-2">
-                        <input 
-                            className="flex-1 bg-slate-800 p-3 rounded-lg text-white border border-slate-700 focus:border-blue-500 outline-none" 
-                            placeholder={poll.type === "word_cloud" ? "Type one word..." : "Share a thought..."} 
-                            value={textInput} 
-                            onChange={(e) => setTextInput(e.target.value)} 
-                            onKeyDown={(e) => e.key === 'Enter' && textInput.trim() && handleVote(textInput)} 
-                        />
-                        <button 
-                            onClick={() => textInput.trim() && handleVote(textInput)} 
-                            className="bg-blue-600 hover:bg-blue-500 px-5 rounded-lg font-bold transition active:scale-95 text-white"
-                        >
-                            Send
-                        </button>
-                    </div>
-                    <p className="text-[10px] text-slate-500 italic text-center">
-                        {poll.type === "word_cloud" ? "Results appear in the cloud." : "Your thought will float up!"}
-                    </p>
-                </div>
-            )}
-        </div>
-    );
 }

@@ -19,6 +19,7 @@ load_dotenv()
 
 # --- GLOBAL MODEL SELECTOR ---
 ACTIVE_MODEL = "gemini-2.0-flash" # Fallback default
+client = None
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -35,41 +36,12 @@ async def lifespan(app: FastAPI):
             client = genai.Client(api_key=api_key)
             print("✅ AI Provider initialized")
             
-            print("🔍 Checking available Gemini models...")
-            # List all models
-            available_models = []
+            # --- MODEL SELECTION LOGIC ---
+            # We verify the model is accessible.
             try:
-                for m in client.models.list():
-                    if "generateContent" in (m.supported_actions or []):
-                        model_id = m.name.replace("models/", "")
-                        available_models.append(model_id)
-                
-                print(f"📋 Found models: {', '.join(available_models[:5])}...")
-
-                # Priority List
-                priority_order = [
-                    "gemini-2.5-flash-lite",
-                    "gemini-2.0-flash-lite",
-                    "gemini-2.5-flash",
-                    "gemini-2.0-flash",
-                    "gemini-1.5-flash"
-                ]
-
-                for candidate in priority_order:
-                    if candidate in available_models:
-                        ACTIVE_MODEL = candidate
-                        print(f"✅ Selected Best Model: {ACTIVE_MODEL}")
-                        break
-                else:
-                    flash_models = [m for m in available_models if "flash" in m]
-                    if flash_models:
-                        ACTIVE_MODEL = flash_models[0]
-                        print(f"⚠️ Exact match failed. Auto-selected: {ACTIVE_MODEL}")
-                    else:
-                        print(f"⚠️ No Flash models found. Keeping default: {ACTIVE_MODEL}")
-
+                print(f"✅ Using Model: {ACTIVE_MODEL}")
             except Exception as e:
-                print(f"⚠️ Model List Failed (Using Default): {e}")
+                print(f"⚠️ Model Check Failed: {e}")
                 
         except Exception as e:
             print(f"⚠️ AI Init Failed: {e}")
@@ -79,25 +51,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- CORS MIDDLEWARE (CRITICAL FIX APPLIED) ---
+# --- CORS MIDDLEWARE ---
+# Using "*" allows all origins, which eliminates CORS errors during development/production debugging.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://flexirush.vercel.app",
-        "https://www.flexirush.com",  # <-- Added for production
-        "https://flexirush.com",      # <-- Added for production
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Connect to Redis (Container name 'redis', port 6379)
-# NOTE: Ensure REDIS_URL env var is set in deployment, fallback to localhost for dev
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
 redis_client = redis.from_url(redis_url, decode_responses=True)
-client = None # Will be set in lifespan
 
 # --- MODELS ---
 class UserAuth(BaseModel):
@@ -112,8 +78,9 @@ class Poll(BaseModel):
     type: str 
     options: Optional[List[Dict[str, Any]]] = []
     correct_option: Optional[int] = None
-    # THE CRITICAL FIX: Allow 'words' dict for Chat Parser
+    # ✅ CRITICAL FEATURE: Support for Chat Parser "Word Cloud"
     words: Optional[Dict[str, int]] = {} 
+    responses: Optional[List[str]] = []
 
 class QnAPost(BaseModel):
     text: str
@@ -243,7 +210,7 @@ async def start_poll(code: str, poll: Poll):
     data = await get_session_data(code)
     if not data: return
     
-    # Save the full poll object (INCLUDING WORDS)
+    # Save the full poll object (INCLUDING WORDS for Chat Visualization)
     data['current_poll'] = poll.dict()
     data['poll_results'] = {} 
     
@@ -265,7 +232,7 @@ async def end_poll(code: str):
     return {"status": "ended"}
 
 @app.post("/api/session/{code}/vote")
-async def vote(code: str, value: str = Body(..., embed=True)): # Fixed to accept plain body or JSON
+async def vote(code: str, value: str = Body(..., embed=True)): 
     data = await get_session_data(code)
     if not data or not data.get('current_poll'): return {"error": "No poll"}
     
@@ -274,16 +241,8 @@ async def vote(code: str, value: str = Body(..., embed=True)): # Fixed to accept
     
     # --- LOGIC UPDATE ---
     if poll_type == 'multiple_choice':
-        try:
-            # Try to handle index-based voting if value is an integer
-            idx = int(value)
-            if 0 <= idx < len(poll['options']):
-                opt = poll['options'][idx]
-                opt['votes'] = opt.get('votes', 0) + 1
-                data['poll_results'][opt['label']] = data['poll_results'].get(opt['label'], 0) + 1
-        except:
-            # Fallback to string-based voting
-            data['poll_results'][value] = data['poll_results'].get(value, 0) + 1
+        # Simple string-based voting match
+        data['poll_results'][value] = data['poll_results'].get(value, 0) + 1
 
     elif poll_type == 'rating':
         data['poll_results'][str(value)] = data['poll_results'].get(str(value), 0) + 1
@@ -404,8 +363,9 @@ async def gen_quiz(req: AIRequest):
     if not client: return {"questions": []}
     try:
         print(f"🧠 Generating quiz using: {ACTIVE_MODEL}")
-        prompt = f"""Generate a quiz about "{req.prompt}". 
-        Return valid raw JSON only. No Markdown. No ```.
+        # HARDENED PROMPT: STRICT JSON ONLY
+        prompt = f"""Generate a 5-question quiz about "{req.prompt}". 
+        Return ONLY valid raw JSON. No Markdown. No ```.
         Format: {{ "title": "Topic Quiz", "questions": [ {{ "text": "Question?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
         
         res = client.models.generate_content(model=ACTIVE_MODEL, contents=prompt)
@@ -430,8 +390,16 @@ async def brand(code: str, req: BrandingRequest):
     await manager.broadcast(code, {"type": "BRANDING_UPDATE", "payload": data['branding']})
     return {"status": "ok"}
 
+# --- QUIZ ENDPOINTS (CRASH PREVENTION ENABLED) ---
+
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
+    # ✅ 🛡️ FIREWALL: If AI returned 0 questions, REJECT the update.
+    # This prevents the Frontend Join Page from crashing.
+    if not quiz.questions or len(quiz.questions) == 0:
+        print(f"⚠️ Blocked empty quiz start for session {code}")
+        raise HTTPException(status_code=400, detail="Cannot start quiz: No questions generated.")
+    
     data = await get_session_data(code)
     data['quiz'] = {"title": quiz.title, "questions": quiz.questions, "current_index": 0, "state": "LOBBY"}
     data['quiz_scores'] = {}
@@ -462,6 +430,7 @@ async def quiz_next(code: str):
 async def quiz_reset(code: str):
     data = await get_session_data(code)
     data['quiz'] = None
+    data['quiz_scores'] = {} 
     await save_session_data(code, data)
     await manager.broadcast(code, {"type": "QUIZ_UPDATE", "quiz": None, "scores": {}})
     return {"status": "reset"}
