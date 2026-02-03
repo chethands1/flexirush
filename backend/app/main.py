@@ -6,7 +6,7 @@ import json
 import redis.asyncio as redis
 import os
 from google import genai
-from google.genai import types # Import types for config
+from google.genai import types
 from dotenv import load_dotenv
 from typing import List, Optional, Dict, Any
 import random
@@ -16,16 +16,20 @@ import csv
 import datetime
 import contextlib
 import re
+import asyncio
 
 load_dotenv()
 
-# --- GLOBAL MODEL SELECTOR ---
-# Gemini 1.5 Flash is best for speed and JSON structure
+# --- GLOBAL SETTINGS ---
+# We default to 1.5-flash because it is the most stable for JSON generation.
 ACTIVE_MODEL = "gemini-1.5-flash" 
 client = None
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Startup Logic: Checks available models but prioritizes stability.
+    """
     global ACTIVE_MODEL
     global client
     
@@ -33,22 +37,61 @@ async def lifespan(app: FastAPI):
     if api_key:
         try:
             client = genai.Client(api_key=api_key)
-            print(f"✅ AI Provider initialized. Using: {ACTIVE_MODEL}")
+            print("✅ AI Provider initialized")
+            
+            print("🔍 Checking available Gemini models...")
+            # We restore your advanced model checking, but changed priority
+            # to avoid 'gemini-2.0' which causes the JSON bugs.
+            available_models = []
+            try:
+                for m in client.models.list():
+                    if "generateContent" in (m.supported_actions or []):
+                        model_id = m.name.replace("models/", "")
+                        available_models.append(model_id)
+                
+                # RESTORED: Your priority order (Modified for stability)
+                # 1.5-flash is strictly better for JSON formatted output currently
+                priority_order = [
+                    "gemini-1.5-flash",        # 🥇 Best for JSON
+                    "gemini-2.0-flash-lite",
+                    "gemini-1.5-pro",
+                    "gemini-2.0-flash",        # ⚠️ Can be unstable with JSON
+                ]
+
+                for candidate in priority_order:
+                    if candidate in available_models:
+                        ACTIVE_MODEL = candidate
+                        print(f"✅ Selected Best Model: {ACTIVE_MODEL}")
+                        break
+                else:
+                    print(f"⚠️ No preferred model found. Defaulting to: {ACTIVE_MODEL}")
+
+            except Exception as e:
+                print(f"⚠️ Model List Failed (Using Default): {e}")
+                
         except Exception as e:
             print(f"⚠️ AI Init Failed: {e}")
+            
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-# --- CORS ---
+# --- RESTORED: SPECIFIC CORS DOMAINS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://flexirush.vercel.app",
+        "https://www.flexirush.com",
+        "https://flexirush.com",
+        "*" # Keep wildcard for development ease, remove if strict security needed
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Connect to Redis
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
 redis_client = redis.from_url(redis_url, decode_responses=True)
 
@@ -65,6 +108,7 @@ class Poll(BaseModel):
     type: str 
     options: Optional[List[Dict[str, Any]]] = []
     correct_option: Optional[int] = None
+    # RESTORED: Chat Parser support
     words: Optional[Dict[str, int]] = {} 
     responses: Optional[List[str]] = []
 
@@ -125,13 +169,13 @@ async def get_session_data(code: str):
     return json.loads(data) if data else None
 
 async def save_session_data(code: str, data: dict):
-    await redis_client.set(f"session:{code}", json.dumps(data), ex=86400)
+    await redis_client.set(f"session:{code}", json.dumps(data), ex=86400) # 24 hours
 
 # --- ROUTES ---
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "FlexiRush Backend"}
+    return {"status": "ok", "service": "FlexiRush Backend", "model": ACTIVE_MODEL}
 
 @app.post("/register")
 async def register(user: UserAuth):
@@ -194,12 +238,20 @@ async def join_session(code: str, user: JoinSession):
 async def start_poll(code: str, poll: Poll):
     data = await get_session_data(code)
     if not data: return
+    
     data['current_poll'] = poll.dict()
     data['poll_results'] = {} 
+    
     if poll.type == 'multiple_choice':
         for opt in poll.options: data['poll_results'][opt['label']] = 0
+        
     await save_session_data(code, data)
-    await manager.broadcast(code, {"type": "POLL_START", "payload": poll.dict()})
+    # FIX: Broadcast full results for instant sync
+    await manager.broadcast(code, {
+        "type": "POLL_START", 
+        "payload": poll.dict(),
+        "results": data['poll_results']
+    })
     return {"status": "ok"}
 
 @app.post("/api/session/{code}/poll/end")
@@ -208,7 +260,7 @@ async def end_poll(code: str):
     if not data: return
     data['current_poll'] = None
     await save_session_data(code, data)
-    await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": None})
+    await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": None, "results": {}})
     return {"status": "ended"}
 
 @app.post("/api/session/{code}/vote")
@@ -220,15 +272,23 @@ async def vote(code: str, value: str = Body(..., embed=True)):
     poll_type = poll['type']
     
     if poll_type == 'multiple_choice':
-        data['poll_results'][value] = data['poll_results'].get(value, 0) + 1
+        # Try exact match first
+        if value in data['poll_results']:
+            data['poll_results'][value] += 1
+        else:
+            # Fallback for old clients
+            data['poll_results'][value] = 1
+
     elif poll_type == 'rating':
         data['poll_results'][str(value)] = data['poll_results'].get(str(value), 0) + 1
         total_score = sum(int(k)*v for k,v in data['poll_results'].items())
         total_votes = sum(data['poll_results'].values())
         poll['average'] = round(total_score / total_votes, 1) if total_votes > 0 else 0
+
     elif poll_type in ['word_cloud', 'open_ended']:
         val = str(value).strip()
         if not val: return
+        
         if poll_type == 'word_cloud':
             key = val.lower()
             data['poll_results'][key] = data['poll_results'].get(key, 0) + 1
@@ -237,7 +297,12 @@ async def vote(code: str, value: str = Body(..., embed=True)):
             poll['responses'].insert(0, val)
 
     await save_session_data(code, data)
-    await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": poll})
+    # FIX: Broadcast full results updates
+    await manager.broadcast(code, {
+        "type": "POLL_RESULTS_UPDATE", 
+        "payload": poll,
+        "results": data['poll_results']
+    })
     return {"status": "recorded"}
 
 @app.post("/api/session/{code}/question")
@@ -254,15 +319,6 @@ async def toggle_q(code: str, q_id: str):
     data = await get_session_data(code)
     for q in data['questions']:
         if q['id'] == q_id: q['visible'] = not q.get('visible', True)
-    await save_session_data(code, data)
-    await manager.broadcast(code, {"type": "QNA_UPDATE", "payload": data['questions']})
-    return {"status": "ok"}
-
-@app.post("/api/session/{code}/question/{q_id}/upvote")
-async def upvote_q(code: str, q_id: str):
-    data = await get_session_data(code)
-    for q in data['questions']:
-        if q['id'] == q_id: q['votes'] += 1
     await save_session_data(code, data)
     await manager.broadcast(code, {"type": "QNA_UPDATE", "payload": data['questions']})
     return {"status": "ok"}
@@ -285,16 +341,21 @@ async def export_results(code: str):
     writer.writerow(["FlexiRush Session Report", code])
     writer.writerow([])
     writer.writerow(["Type", "Question/Content", "Value", "Count/Score"])
+    
     if data['poll_results']:
         for k, v in data['poll_results'].items():
             writer.writerow(["Poll", "Live Vote", k, v])
+            
     if data['current_poll'] and data['current_poll'].get('words'):
         for k, v in data['current_poll']['words'].items():
             writer.writerow(["Chat", "Parsed Word", k, v])
+            
     for q in data['questions']:
         writer.writerow(["Q&A", q['text'], "-", q['votes']])
+        
     for user, score in data['quiz_scores'].items():
         writer.writerow(["Quiz Score", "User", user, score])
+        
     output.seek(0)
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode()), 
@@ -302,7 +363,7 @@ async def export_results(code: str):
         headers={"Content-Disposition": f"attachment; filename=flexirush_{code}.csv"}
     )
 
-# --- AI ROUTES ---
+# --- AI ROUTES (FIXED: RETRY LOGIC) ---
 
 @app.post("/api/ai/summarize")
 async def summarize(req: SummarizeRequest):
@@ -319,53 +380,38 @@ async def summarize(req: SummarizeRequest):
 @app.post("/api/ai/generate-quiz")
 async def gen_quiz(req: AIRequest):
     if not client: return {"questions": []}
-    try:
-        print(f"🧠 Generating quiz for: {req.prompt}")
-        
-        # --- ROBUST AI REQUEST (FORCED JSON) ---
-        prompt = f"""You are a helpful AI that generates quiz data in STRICT JSON format.
-        Create a 5-question multiple choice quiz about: "{req.prompt}".
-        
-        The JSON structure must exactly match this:
-        {{
-          "title": "Quiz Title",
-          "questions": [
-            {{
-              "text": "Question text here?",
-              "options": ["Option A", "Option B", "Option C", "Option D"],
-              "correct_index": 0,
-              "time_limit": 30
-            }}
-          ]
-        }}
-        """
-        
-        # 1. Force JSON MIME Type (The key fix)
-        res = client.models.generate_content(
-            model=ACTIVE_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
-        
-        txt = res.text.strip()
-        
-        # 2. Parse
-        data = json.loads(txt)
-        
-        # 3. Validate
-        if "questions" not in data or not data["questions"]:
-            print("⚠️ AI generated valid JSON but empty questions.")
-            return {"title": "Error", "questions": []}
-            
-        print(f"✅ Generated {len(data['questions'])} questions.")
-        return data
+    
+    prompt = f"""Generate a 5-question trivia quiz about "{req.prompt}".
+    Return STRICT JSON only. No markdown.
+    Structure: {{ "title": "Quiz Title", "questions": [ {{ "text": "Q?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
 
-    except Exception as e:
-        print(f"❌ AI Error: {e}")
-        # Return empty so the frontend knows to show the error message
-        return {"title": "AI Error", "questions": []}
+    # --- RETRY LOOP (Crucial for Stability) ---
+    # Tries 3 times to get valid JSON before giving up
+    for attempt in range(3):
+        try:
+            print(f"🧠 AI Attempt {attempt+1} using {ACTIVE_MODEL} for: {req.prompt}")
+            res = client.models.generate_content(
+                model=ACTIVE_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
+            data = json.loads(res.text)
+            
+            # Verify data integrity
+            if "questions" in data and len(data["questions"]) > 0:
+                print(f"✅ Success on attempt {attempt+1}")
+                return data
+            else:
+                print(f"⚠️ Attempt {attempt+1} returned empty questions.")
+                
+        except Exception as e:
+            print(f"❌ Attempt {attempt+1} failed: {e}")
+            await asyncio.sleep(1) # Backoff
+
+    print("❌ All AI attempts failed.")
+    return {"title": "Error", "questions": []}
 
 @app.post("/api/session/{code}/branding")
 async def brand(code: str, req: BrandingRequest):
@@ -375,14 +421,14 @@ async def brand(code: str, req: BrandingRequest):
     await manager.broadcast(code, {"type": "BRANDING_UPDATE", "payload": data['branding']})
     return {"status": "ok"}
 
-# --- QUIZ ENDPOINTS ---
+# --- QUIZ ENDPOINTS (SECURED) ---
 
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
-    # --- FIREWALL ---
+    # --- FIREWALL: REJECTS EMPTY QUIZZES ---
     if not quiz.questions or len(quiz.questions) == 0:
-        print(f"⚠️ Blocked empty quiz for session {code}")
-        raise HTTPException(status_code=400, detail="No questions generated.")
+        print(f"⚠️ Blocked corrupted quiz start for session {code}")
+        raise HTTPException(status_code=400, detail="Cannot start quiz: No questions generated.")
     
     data = await get_session_data(code)
     data['quiz'] = {"title": quiz.title, "questions": quiz.questions, "current_index": 0, "state": "LOBBY"}

@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import Image from "next/image";
-// Removed unused 'useRouter' import
 import { useSessionStore } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
 
@@ -40,12 +39,48 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
     setToken
   } = useSessionStore();
 
-  // --- RESET STATE ON CHANGE ---
+  // --- PERSISTENCE: CHECK LOCALSTORAGE ---
   useEffect(() => {
-      setHasVoted(false);
-      setSelectedOption(null);
-      setPollAnswer("");
-  }, [currentPoll?.question, quiz?.current_index, quiz?.state]);
+      // Logic: If poll question changes, reset vote state.
+      // But if same question, check localStorage.
+      const activityKey = currentPoll 
+          ? `poll_${code}_${currentPoll.question}` 
+          : quiz 
+              ? `quiz_${code}_${quiz.current_index}` 
+              : null;
+
+      if (activityKey) {
+          const alreadyVoted = localStorage.getItem(activityKey);
+          if (alreadyVoted) {
+              setHasVoted(true);
+              const savedOption = localStorage.getItem(activityKey + "_opt");
+              if (savedOption) setSelectedOption(Number(savedOption));
+          } else {
+              setHasVoted(false);
+              setSelectedOption(null);
+              setPollAnswer("");
+          }
+      } else {
+          setHasVoted(false);
+      }
+  }, [currentPoll, quiz, code]);
+
+  // --- HELPER: MARK AS VOTED ---
+  const markAsVoted = (optionIndex?: number) => {
+      const activityKey = currentPoll 
+          ? `poll_${code}_${currentPoll.question}` 
+          : quiz 
+              ? `quiz_${code}_${quiz.current_index}` 
+              : null;
+      
+      if (activityKey) {
+          localStorage.setItem(activityKey, "true");
+          if (optionIndex !== undefined) {
+              localStorage.setItem(activityKey + "_opt", String(optionIndex));
+          }
+      }
+      setHasVoted(true);
+  };
 
   // --- API HELPER ---
   const apiCall = useCallback(async (endpoint: string, body?: unknown) => {
@@ -57,12 +92,13 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (res.ok) setHasVoted(true);
+      if (res.ok) return true;
     } catch (err) {
       console.error(err);
     } finally {
       setIsSubmitting(false);
     }
+    return false;
   }, [code]);
 
   // --- HANDLER: JOIN SESSION ---
@@ -94,18 +130,20 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       }
   };
 
-  const handlePollVote = (value: string | number) => {
+  const handlePollVote = async (value: string | number) => {
       if (hasVoted) return;
-      apiCall("/vote", { value });
+      const success = await apiCall("/vote", { value });
+      if (success) markAsVoted();
   };
 
-  const handleQuizAnswer = (index: number) => {
+  const handleQuizAnswer = async (index: number) => {
       if (hasVoted || !user) return;
       setSelectedOption(index);
-      apiCall("/quiz/answer", { 
+      const success = await apiCall("/quiz/answer", { 
           user_name: user.email || "Anonymous", 
           option_index: index 
       });
+      if (success) markAsVoted(index);
   };
 
   // --- 🛡️ SAFETY SHIELD ---
@@ -127,29 +165,29 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   if (!user) {
       return (
           <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white">
-              <div className="w-full max-w-sm bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl">
+              <div className="w-full max-w-sm bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl animate-in zoom-in duration-300">
                   <div className="text-center mb-8">
-                      <div className="w-16 h-16 bg-blue-600 rounded-xl mx-auto flex items-center justify-center text-2xl font-bold mb-4">FR</div>
-                      <h1 className="text-2xl font-bold">Join Session</h1>
-                      <p className="text-slate-400 text-sm mt-2">Enter your name to join the activity.</p>
+                      <div className="w-16 h-16 bg-blue-600 rounded-xl mx-auto flex items-center justify-center text-2xl font-bold mb-4 shadow-lg shadow-blue-900/50">FR</div>
+                      <h1 className="text-3xl font-bold mb-2">Join Session</h1>
+                      <p className="text-slate-400 text-sm">Enter your name to join the activity.</p>
                   </div>
                   
-                  <form onSubmit={handleJoinSession} className="space-y-4">
+                  <form onSubmit={handleJoinSession} className="space-y-6">
                       <div>
-                          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Your Name</label>
+                          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">Your Name</label>
                           <input 
                               type="text" 
                               value={guestName}
                               onChange={(e) => setGuestName(e.target.value)}
                               placeholder="e.g. John Doe"
-                              className="w-full bg-slate-950 border border-slate-700 p-4 rounded-lg text-white outline-none focus:ring-2 focus:ring-blue-500 transition mt-1"
+                              className="w-full bg-slate-950 border border-slate-700 p-4 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500 transition placeholder:text-slate-600 font-medium"
                               autoFocus
                           />
                       </div>
                       <button 
                           type="submit" 
                           disabled={!guestName.trim() || isJoining}
-                          className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold py-4 rounded-lg transition shadow-lg flex justify-center items-center gap-2"
+                          className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold py-4 rounded-xl transition shadow-lg flex justify-center items-center gap-2 transform active:scale-[0.98]"
                       >
                           {isJoining ? <span className="animate-spin text-xl">◌</span> : "Join Now 🚀"}
                       </button>
@@ -164,12 +202,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
     <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col">
       <header className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 backdrop-blur-md sticky top-0 z-10">
           <div className="flex items-center gap-2">
-             {branding?.logo_url ? <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded" /> : <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold">FR</div>}
+             {branding?.logo_url ? <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded" /> : <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-xs">FR</div>}
              <span className="font-bold hidden sm:block">FlexiRush</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
               <div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500 shadow-[0_0_8px_#22c55e]" : "bg-red-500"}`}></div>
-              <span className="font-mono bg-slate-800 px-2 py-1 rounded text-xs border border-slate-700">{code}</span>
+              <span className="font-mono bg-slate-800 px-3 py-1 rounded-lg text-xs border border-slate-700 font-bold tracking-widest">{code}</span>
           </div>
       </header>
 
@@ -177,28 +215,28 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
             {/* QUIZ VIEW */}
             {quiz && quiz.state !== "END" && (
                 <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
-                    <div className="text-center mb-6">
-                        <span className="bg-purple-900/30 text-purple-300 text-xs font-bold px-3 py-1 rounded-full border border-purple-500/30 uppercase tracking-widest">
+                    <div className="text-center mb-8">
+                        <span className="bg-purple-900/30 text-purple-300 text-xs font-bold px-4 py-1.5 rounded-full border border-purple-500/30 uppercase tracking-widest">
                             {quiz.state === "LOBBY" ? "Quiz Lobby" : `Question ${quiz.current_index + 1}`}
                         </span>
                     </div>
 
                     {quiz.state === "LOBBY" && (
                         <div className="text-center py-10">
-                            <h1 className="text-4xl font-black text-transparent bg-clip-text bg-linear-to-br from-purple-400 to-pink-600 mb-4">Get Ready!</h1>
-                            <p className="text-slate-400">The quiz will start soon.</p>
-                            <div className="mt-8 text-6xl animate-bounce">🚀</div>
+                            <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-br from-purple-400 to-pink-600 mb-6">Get Ready!</h1>
+                            <p className="text-slate-400 text-lg">The quiz will start soon.</p>
+                            <div className="mt-12 text-7xl animate-bounce">🚀</div>
                         </div>
                     )}
 
                     {quiz.state === "QUESTION" && (
                         safeQuizQuestion ? (
-                            <div className="space-y-6">
-                                <h2 className="text-2xl font-bold text-center leading-snug">{safeQuizQuestion.text}</h2>
-                                <div className="h-2 bg-slate-800 rounded-full overflow-hidden w-full">
+                            <div className="space-y-8">
+                                <h2 className="text-3xl font-bold text-center leading-snug">{safeQuizQuestion.text}</h2>
+                                <div className="h-3 bg-slate-800 rounded-full overflow-hidden w-full shadow-inner">
                                     <div 
                                         key={quiz.current_index} 
-                                        className="h-full bg-purple-500 origin-left" 
+                                        className="h-full bg-linear-to-r from-purple-500 to-pink-500 origin-left" 
                                         /* webhint: ignore inline-styles */ 
                                         style={{ animation: `width_linear ${safeQuizQuestion.time_limit}s linear forwards`, width: '100%' }}
                                     ></div>
@@ -206,26 +244,39 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                                 <div className="grid gap-3">
                                     {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                                     {safeQuizQuestion.options.map((opt: any, i: number) => (
-                                        <button key={i} disabled={hasVoted || isSubmitting} onClick={() => handleQuizAnswer(i)} className={`p-4 rounded-xl text-lg font-bold transition-all transform active:scale-95 flex items-center gap-3 text-left border-2 ${hasVoted ? (selectedOption === i ? "bg-purple-600 border-purple-500 text-white" : "bg-slate-800 border-slate-700 text-slate-500 opacity-50") : "bg-slate-800 border-slate-700 hover:border-purple-500 hover:bg-slate-750 text-slate-200"}`}>
-                                            <span className="w-8 h-8 rounded-full bg-black/20 flex items-center justify-center text-sm">{['A','B','C','D'][i]}</span>
+                                        <button 
+                                            key={i} 
+                                            disabled={hasVoted || isSubmitting} 
+                                            onClick={() => handleQuizAnswer(i)} 
+                                            className={`p-5 rounded-2xl text-lg font-bold transition-all transform active:scale-95 flex items-center gap-4 text-left border-2 shadow-lg
+                                                ${hasVoted 
+                                                    ? (selectedOption === i 
+                                                        ? "bg-purple-600 border-purple-500 text-white shadow-purple-900/50" 
+                                                        : "bg-slate-800 border-slate-800 text-slate-500 opacity-50") 
+                                                    : "bg-slate-800 border-slate-700 hover:border-purple-500 hover:bg-slate-750 text-slate-200"
+                                                }`}
+                                        >
+                                            <span className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold ${hasVoted && selectedOption===i ? 'bg-white/20' : 'bg-black/30'}`}>{['A','B','C','D'][i]}</span>
                                             {typeof opt === 'string' ? opt : opt.label}
                                         </button>
                                     ))}
                                 </div>
-                                {hasVoted && <p className="text-center text-green-400 font-bold animate-pulse">Answer Sent! 🔒</p>}
+                                {hasVoted && <div className="text-center p-3 bg-green-900/30 text-green-400 font-bold rounded-xl border border-green-500/30 animate-pulse">Answer Sent! 🔒</div>}
                             </div>
                         ) : (
-                            <div className="text-center py-12 text-slate-500 animate-pulse"><div className="text-4xl mb-4">⏳</div><p>Waiting for question...</p></div>
+                            <div className="text-center py-20 text-slate-500 animate-pulse"><div className="text-6xl mb-4">⏳</div><p>Loading question...</p></div>
                         )
                     )}
 
                     {quiz.state === "LEADERBOARD" && (
-                        <div className="text-center py-10 space-y-6">
-                            <h2 className="text-3xl font-bold text-yellow-400">Time&apos;s Up!</h2>
-                            <div className="bg-slate-800 p-6 rounded-2xl border border-slate-700">
-                                <p className="text-slate-400 text-sm uppercase tracking-widest mb-2">Your Score</p>
-                                <p className="text-5xl font-mono font-bold text-white">{quizScores[user.email || "Anonymous"] || 0}</p>
+                        <div className="text-center py-10 space-y-8 animate-in zoom-in">
+                            <h2 className="text-4xl font-black text-yellow-400 drop-shadow-md">Time&apos;s Up!</h2>
+                            <div className="bg-slate-800 p-8 rounded-3xl border border-slate-700 shadow-2xl">
+                                <p className="text-slate-400 text-xs uppercase tracking-widest mb-2 font-bold">Your Current Score</p>
+                                <p className="text-6xl font-mono font-bold text-white tracking-tighter">{quizScores[user.email || "Anonymous"] || 0}</p>
+                                <p className="text-slate-500 text-xs mt-2">pts</p>
                             </div>
+                            <p className="text-slate-500 text-sm">Look at the big screen for rankings!</p>
                         </div>
                     )}
                 </div>
@@ -233,31 +284,58 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
             {/* POLL VIEW */}
             {!quiz && currentPoll && (
-                <div className="w-full space-y-6 animate-in fade-in zoom-in duration-300">
+                <div className="w-full space-y-8 animate-in fade-in zoom-in duration-300">
                     <div className="text-center mb-4">
-                        <span className="bg-blue-900/30 text-blue-300 text-xs font-bold px-3 py-1 rounded-full border border-blue-500/30 uppercase">Live Poll</span>
+                        <span className="bg-blue-900/30 text-blue-300 text-xs font-bold px-4 py-1.5 rounded-full border border-blue-500/30 uppercase tracking-widest">Live Poll</span>
                     </div>
-                    <h2 className="text-2xl font-bold text-center">{currentPoll.question}</h2>
+                    <h2 className="text-3xl font-bold text-center leading-snug">{currentPoll.question}</h2>
+                    
                     {currentPoll.type === "multiple_choice" && (
                         <div className="grid gap-3">
                             {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
                             {currentPoll.options?.map((opt: any, i: number) => (
-                                <button key={i} onClick={() => handlePollVote(opt.label)} disabled={hasVoted} className={`p-4 rounded-xl font-bold text-left transition-all ${hasVoted ? "bg-slate-800 text-slate-500 cursor-not-allowed" : "bg-blue-600 hover:bg-blue-500 text-white shadow-lg active:scale-95"}`}>
+                                <button 
+                                    key={i} 
+                                    onClick={() => handlePollVote(opt.label)} 
+                                    disabled={hasVoted} 
+                                    className={`p-5 rounded-2xl font-bold text-left transition-all shadow-lg active:scale-95 ${hasVoted ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700" : "bg-blue-600 hover:bg-blue-500 text-white"}`}
+                                >
                                     {opt.label}
                                 </button>
                             ))}
                         </div>
                     )}
+
                     {(currentPoll.type === "word_cloud" || currentPoll.type === "open_ended") && (
                         <div className="space-y-4">
-                            <input value={pollAnswer} onChange={(e) => setPollAnswer(e.target.value)} placeholder="Type your answer..." className="w-full p-4 bg-slate-800 border border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-white placeholder:text-slate-500" disabled={hasVoted}/>
-                            <button onClick={() => handlePollVote(pollAnswer)} disabled={!pollAnswer.trim() || hasVoted} className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold rounded-xl transition">{hasVoted ? "Sent!" : "Submit"}</button>
+                            <textarea 
+                                value={pollAnswer} 
+                                onChange={(e) => setPollAnswer(e.target.value)} 
+                                placeholder="Type your answer here..." 
+                                className="w-full p-5 bg-slate-800 border border-slate-700 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-white placeholder:text-slate-500 resize-none h-32 text-lg" 
+                                disabled={hasVoted}
+                            />
+                            <button 
+                                onClick={() => handlePollVote(pollAnswer)} 
+                                disabled={!pollAnswer.trim() || hasVoted} 
+                                className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg active:scale-95"
+                            >
+                                {hasVoted ? "Sent! ✅" : "Submit Answer"}
+                            </button>
                         </div>
                     )}
+
                     {currentPoll.type === "rating" && (
-                        <div className="flex justify-center gap-2 py-8">
+                        <div className="flex justify-center gap-3 py-10">
                             {[1, 2, 3, 4, 5].map((star) => (
-                                <button key={star} onClick={() => handlePollVote(star)} disabled={hasVoted} className={`text-4xl transition-transform hover:scale-125 ${hasVoted ? "opacity-50 cursor-default" : "cursor-pointer"}`}>★</button>
+                                <button 
+                                    key={star} 
+                                    onClick={() => handlePollVote(star)} 
+                                    disabled={hasVoted} 
+                                    className={`text-5xl transition-transform hover:scale-125 active:scale-90 ${hasVoted ? "opacity-30 cursor-default grayscale" : "cursor-pointer"}`}
+                                >
+                                    ★
+                                </button>
                             ))}
                         </div>
                     )}
@@ -267,9 +345,9 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
             {/* WAITING VIEW */}
             {!quiz && !currentPoll && (
                 <div className="text-center py-20 text-slate-500 animate-pulse">
-                    <div className="text-6xl mb-6 grayscale opacity-20">☕</div>
-                    <h2 className="text-xl font-bold text-slate-300 mb-2">Waiting for Presenter</h2>
-                    <p className="text-sm">Sit back and relax!</p>
+                    <div className="text-7xl mb-6 grayscale opacity-20">☕</div>
+                    <h2 className="text-2xl font-bold text-slate-300 mb-2">Waiting for Presenter</h2>
+                    <p className="text-sm">Sit back and relax! The session will resume shortly.</p>
                 </div>
             )}
       </main>

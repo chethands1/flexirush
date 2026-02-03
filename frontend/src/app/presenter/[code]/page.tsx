@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
+// ✅ FIX: Added 'Question' to imports to fix TypeScript error
 import { useSessionStore, Question } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
 
@@ -19,10 +20,7 @@ const TransientThoughts = dynamic(() => import("@/components/TransientThoughts")
 // --- CONFIGURATION ---
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 
-interface PollOption {
-  label: string;
-  votes: number;
-}
+// ✅ FIX: Removed unused 'PollOption' interface
 
 export default function PresenterDashboard({ params }: { params: Promise<{ code: string }> }) {
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
@@ -97,14 +95,14 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
-  // --- SYNC ENGINE (Fixed for Null States) ---
+  // --- SYNC ENGINE ---
   const syncState = useCallback(async () => {
       // Don't sync if we just clicked a button (prevents jumpiness)
       if (Date.now() - lastActionTime.current < 2000) return;
 
       const data = await apiCall("/state");
       if (data) {
-        // CRITICAL FIX: Explicitly handle null/undefined to clear state
+        // Explicitly handle null to clear state if server says so
         setQuiz(data.quiz || null);
         setPoll(data.current_poll || null);
         setQuestions(data.questions || []);
@@ -129,7 +127,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       updateFn(); 
   }, []);
 
-  // FIXED: Wrapped in useCallback to satisfy linter
   const handleAction = useCallback(async (actionFn: () => Promise<void>) => {
     if (actionLoading) return;
     setActionLoading(true);
@@ -238,12 +235,10 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   };
 
   const totalPollVotes = useMemo(() => {
-    if (!currentPoll?.options) return 0;
-    return (currentPoll.options as PollOption[]).reduce((acc, curr) => {
-        const liveVotes = pollResults?.[curr.label];
-        return acc + (liveVotes !== undefined ? liveVotes : (curr.votes || 0));
-    }, 0);
-  }, [currentPoll, pollResults]);
+    if (!pollResults) return 0;
+    // Calculate total votes dynamically from the live results object
+    return Object.values(pollResults).reduce((acc, curr) => acc + (curr as number), 0);
+  }, [pollResults]);
 
   if (!resolvedParams || !token) {
       return (
@@ -294,11 +289,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
                           <h3 className="text-yellow-400 font-bold mb-4 text-sm uppercase tracking-wider">Current Quiz State</h3>
+                          {/* ✅ FIX: Updated Tailwind class to wrap-break-word */}
                           <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(quiz, null, 2)}</pre>
                       </div>
                       <div className="space-y-6">
                           <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
                               <h3 className="text-blue-400 font-bold mb-4 text-sm uppercase tracking-wider">Raw Question Data</h3>
+                              {/* ✅ FIX: Updated Tailwind class to wrap-break-word */}
                               <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(rawQ || "NULL (No Data Found)", null, 2)}</pre>
                           </div>
                       </div>
@@ -324,6 +321,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                 FR
                 </div>
             )}
+            {/* ✅ FIX: Updated Tailwind class to bg-linear-to-r */}
             <h1 className="hidden sm:block text-2xl font-bold bg-clip-text text-transparent bg-linear-to-r from-white to-slate-400">
                 FlexiRush Presenter
             </h1>
@@ -375,6 +373,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: LOBBY */}
                     {quiz.state === "LOBBY" && (
                         <div className="space-y-8">
+                            {/* ✅ FIX: Updated Tailwind class to bg-linear-to-r */}
                             <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-blue-400 to-purple-600">
                                 Get Ready!
                             </h1>
@@ -405,6 +404,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
                                         <div 
                                             key={quiz.current_index} 
+                                            // ✅ FIX: Updated Tailwind class to bg-linear-to-r
                                             className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
                                             /* webhint: ignore inline-styles */
                                             style={{ 
@@ -492,6 +492,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: END */}
                     {quiz.state === "END" && (
                         <div className="space-y-8 animate-in zoom-in duration-500 pt-12">
+                            {/* ✅ FIX: Updated Tailwind class to bg-linear-to-r */}
                             <h1 className="text-6xl font-black text-transparent bg-clip-text bg-linear-to-r from-yellow-400 to-orange-500 drop-shadow-sm">
                                 GAME OVER
                             </h1>
@@ -538,7 +539,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         {currentPoll.type === "multiple_choice" && (
                         <div className="space-y-4 max-w-2xl mx-auto w-full">
                             {currentPoll.options?.map((opt: { label: string; votes: number }, idx: number) => {
-                            const count = pollResults?.[opt.label] ?? opt.votes ?? 0;
+                            // DYNAMIC SYNC: pollResults now comes live via socket/api
+                            const count = pollResults?.[opt.label] ?? 0;
                             const percent = totalPollVotes > 0 ? (count / totalPollVotes) * 100 : 0;
                             
                             return (
@@ -569,6 +571,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         {currentPoll.type === "rating" && (
                         <div className="flex flex-col items-center justify-center py-12">
                             <div className="relative">
+                                {/* ✅ FIX: Updated Tailwind class to bg-linear-to-br */}
                                 <div className="text-8xl font-black text-transparent bg-clip-text bg-linear-to-br from-yellow-300 to-yellow-600 flex items-baseline gap-2">
                                     {currentPoll.average || 0.0} 
                                 </div>
@@ -578,14 +581,14 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     <span key={star} className={`text-4xl ${star <= Math.round(currentPoll.average || 0) ? 'text-yellow-400' : 'text-slate-700'}`}>★</span>
                                 ))}
                             </div>
-                            <p className="text-slate-500 mt-4">{Object.values(pollResults || {}).reduce((a:number,b:number)=>a+b, 0)} votes</p>
+                            <p className="text-slate-500 mt-4">{totalPollVotes} votes</p>
                         </div>
                         )}
 
                         {currentPoll.type === "word_cloud" && (
                             <div className="flex flex-wrap gap-4 justify-center items-center py-8 min-h-75">
-                            {/* FIX: Correctly prioritize static words if live votes are empty */}
                             {(() => {
+                                // Prefer live results, fallback to initial words
                                 const wordsToShow = (pollResults && Object.keys(pollResults).length > 0) 
                                     ? pollResults 
                                     : (currentPoll.words || {});
@@ -725,6 +728,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                   </button>
                   <button
                     onClick={() => setShowAIModal(true)}
+                    // ✅ FIX: Updated Tailwind class to bg-linear-to-br
                     className="p-3 bg-linear-to-br from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold rounded-lg transition flex flex-col items-center justify-center gap-1 shadow-lg active:scale-[0.98]"
                   >
                     <span className="text-xl">✨</span>
@@ -829,6 +833,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
               <button 
                 onClick={handleAiAnalyze} 
                 disabled={analyzing} 
+                // ✅ FIX: Updated Tailwind class to bg-linear-to-r
                 className="w-full p-4 bg-linear-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl transition text-left border border-indigo-400/30 flex justify-between items-center shadow-lg active:scale-[0.98]"
               >
                 <div className="flex flex-col">
