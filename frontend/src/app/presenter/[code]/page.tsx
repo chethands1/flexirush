@@ -89,8 +89,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
-      // 404 is common for polling if session is closed, don't throw for it
-      if (!res.ok && res.status !== 404) console.warn(`API Warning: ${res.status} on ${endpoint}`);
       if (!res.ok) return null;
       return await res.json();
     } catch (err) {
@@ -101,7 +99,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   // --- SYNC ENGINE ---
   const syncState = useCallback(async () => {
-      // Don't sync if we just clicked a button (prevents jumpiness)
       if (Date.now() - lastActionTime.current < 2000) return;
 
       const data = await apiCall("/state");
@@ -126,8 +123,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   // --- ROBUST ACTION HANDLERS ---
   
   const handleOptimisticUpdate = (updateFn: () => void) => {
-      lastActionTime.current = Date.now(); // Block external sync temporarily
-      updateFn(); // Update UI immediately
+      lastActionTime.current = Date.now(); 
+      updateFn(); 
   };
 
   const handleAction = async (actionFn: () => Promise<void>) => {
@@ -138,7 +135,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         await syncState(); 
     } catch (e) {
         console.error(e);
-        // Don't alert, just log. Alerts freeze the UI.
     } finally {
         setTimeout(() => setActionLoading(false), 500);
     }
@@ -152,7 +148,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const handleNextQuizStep = () => handleAction(async () => {
       if (!quiz) return;
       
-      // OPTIMISTIC UPDATE: Match Backend Logic (Question -> Leaderboard -> Question)
       handleOptimisticUpdate(() => {
           let nextState = quiz.state;
           let nextIndex = quiz.current_index;
@@ -175,7 +170,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       await apiCall("/quiz/next", "POST");
   });
 
-  // ✅ CRITICAL FIX: Use /quiz/reset (matches main.py), NOT /quiz/end
   const handleCloseQuiz = () => handleAction(async () => {
       handleOptimisticUpdate(() => setQuiz(null)); 
       await apiCall("/quiz/reset", "POST");
@@ -200,12 +194,10 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   };
 
   const handleQuizCreated = () => {
-      // Force sync immediately after creation
       lastActionTime.current = 0; 
       syncState();
   };
 
-  // --- AI ANALYSIS ---
   const handleAiAnalyze = async () => {
     if (analyzing) return;
     setAnalyzing(true);
@@ -252,14 +244,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       );
   }
 
-  // --- 🛡️ DATA GUARD: PREVENT CRASHES ---
-  // If quiz exists but questions array is empty/missing, this ensures we don't crash
+  // --- SAFETY CHECK ---
+  // If questions array is empty (AI Failed), prevent crash
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rawQ: any = (quiz && quiz.questions && quiz.questions.length > 0 && quiz.questions[quiz.current_index]) 
     ? quiz.questions[quiz.current_index] 
     : null;
   
-  // Normalize fields to handle AI inconsistencies
   const currentQ = rawQ ? {
       text: rawQ.text || rawQ.question || "Mystery Question",
       options: rawQ.options || rawQ.answers || [],
@@ -434,16 +425,19 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </>
                             ) : (
                                 <div className="flex flex-col items-center justify-center text-slate-500 gap-4 py-10">
-                                    {/* SAFETY FALLBACK: If quiz is active but questions missing */}
-                                    <p className="text-xl font-bold text-red-400">⚠️ AI Quiz Generation Failed</p>
-                                    <p className="text-sm">The AI created a quiz session but returned 0 questions.</p>
-                                    <p className="text-xs text-slate-600 font-mono">Raw Question Data: NULL</p>
-                                    <button 
-                                        onClick={handleCloseQuiz} 
-                                        className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded mt-4"
-                                    >
-                                        Return to Lobby & Try Again
-                                    </button>
+                                    <div className="bg-red-900/20 border border-red-500/50 p-6 rounded-xl max-w-md text-center animate-in zoom-in">
+                                        <p className="text-4xl mb-4">⚠️</p>
+                                        <h3 className="text-xl font-bold text-red-400 mb-2">AI Quiz Generation Failed</h3>
+                                        <p className="text-sm text-slate-300 mb-4">
+                                            The AI created a session but didn&apos;t return any questions. This happens when the AI service is overloaded.
+                                        </p>
+                                        <button 
+                                            onClick={handleCloseQuiz} 
+                                            className="w-full bg-slate-700 hover:bg-slate-600 text-white px-4 py-3 rounded-lg font-bold transition"
+                                        >
+                                            Return to Lobby & Try Again
+                                        </button>
+                                    </div>
                                 </div>
                             )}
                         </div>
