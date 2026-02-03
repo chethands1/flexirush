@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -26,10 +26,12 @@ interface PollOption {
 
 export default function PresenterDashboard({ params }: { params: Promise<{ code: string }> }) {
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
-  
-  // --- SIDEBAR MODE LOGIC ---
   const searchParams = useSearchParams();
   const isSidebar = searchParams.get("sidebar") === "true";
+
+  // Debug State
+  const [showDebug, setShowDebug] = useState(false);
+  const lastActionTime = useRef<number>(0);
 
   useEffect(() => {
     params.then(setResolvedParams);
@@ -38,7 +40,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const code = resolvedParams?.code || "";
   const router = useRouter();
 
-  // 1. Connect to Realtime (WebSocket)
+  // 1. Connect to Realtime
   useRealtime(code, "presenter");
 
   const { 
@@ -56,7 +58,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     setQuestions
   } = useSessionStore();
 
-  // Local UI State
   const [showPollForm, setShowPollForm] = useState(false);
   const [showWheel, setShowWheel] = useState(false);
   const [showQuizCreator, setShowQuizCreator] = useState(false);
@@ -69,20 +70,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const [aiSummary, setAiSummary] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
-  const [lastSync, setLastSync] = useState<string>("Never");
-  const [showDebug, setShowDebug] = useState(false); // Toggle for raw data view
 
   // --- AUTH CHECK ---
   useEffect(() => {
     if (!token && resolvedParams) router.push("/login");
   }, [token, router, resolvedParams]);
 
-  // --- BRANDING SYNC ---
   useEffect(() => {
     if (branding?.logo_url) setTempLogo(branding.logo_url);
   }, [branding]);
 
-  // --- ROBUST API CALLER ---
+  // --- API HELPER ---
   const apiCall = useCallback(async (endpoint: string, method: "GET" | "POST" = "GET", body?: unknown) => {
     if (!code) return;
     try {
@@ -91,7 +89,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!res.ok) throw new Error(`API Error ${res.status}: ${res.statusText}`);
+      if (!res.ok) throw new Error(`API Error ${res.status}`);
       return await res.json();
     } catch (err) {
       console.error(`❌ API Failed (${endpoint}):`, err);
@@ -99,22 +97,23 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
-  // --- SYNC ENGINE ---
+  // --- SYNC ENGINE (Heartbeat) ---
   const syncState = useCallback(async () => {
+      // Throttle: Don't sync if we just clicked a button (prevents UI jumping)
+      if (Date.now() - lastActionTime.current < 2000) return;
+
       const data = await apiCall("/state");
       if (data) {
-        // Only update if data exists to prevent clearing state on bad fetch
         if (data.quiz) setQuiz(data.quiz);
         if (data.current_poll) setPoll(data.current_poll);
         if (data.questions) setQuestions(data.questions);
-        setLastSync(new Date().toLocaleTimeString());
       }
   }, [apiCall, setQuiz, setPoll, setQuestions]);
 
-  // 1. Initial Sync
+  // Initial Sync
   useEffect(() => { if(code) syncState(); }, [code, syncState]);
 
-  // 2. Heartbeat (3s) - Keeps UI alive even if WS drops
+  // Heartbeat (Every 3 seconds)
   useEffect(() => {
       if (!code) return;
       const interval = setInterval(syncState, 3000); 
@@ -122,30 +121,62 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   }, [code, syncState]);
 
 
-  // --- ACTION HANDLERS (Unbreakable) ---
+  // --- OPTIMISTIC ACTIONS ---
+  
+  const handleOptimisticUpdate = (updateFn: () => void) => {
+      lastActionTime.current = Date.now(); // Block external sync temporarily
+      updateFn(); // Update UI immediately
+  };
 
+  // Wrapper to handle loading states systematically
   const handleAction = async (actionFn: () => Promise<void>) => {
     if (actionLoading) return;
-    setActionLoading(true);
+    setActionLoading(true); // Using state setter here
     try {
         await actionFn();
-        await syncState(); // Immediate update
+        await syncState(); 
     } catch (e) {
-        console.error("Action failed", e);
-        alert("Command failed. Please try again.");
+        console.error(e);
+        alert("Action failed. Check console.");
     } finally {
-        // ALWAYS unlock buttons
-        setActionLoading(false);
+        setTimeout(() => setActionLoading(false), 500);
     }
   };
 
-  const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
+  const endPoll = () => handleAction(async () => {
+      handleOptimisticUpdate(() => setPoll(null));
+      await apiCall("/poll/end", "POST");
+  });
   
   const handleNextQuizStep = () => handleAction(async () => {
+      if (!quiz) return;
+      
+      // Optimistic: Advance UI immediately
+      handleOptimisticUpdate(() => {
+          let nextState = quiz.state;
+          let nextIndex = quiz.current_index;
+
+          if (quiz.state === "LOBBY") {
+              nextState = "QUESTION";
+              nextIndex = 0;
+          } else if (quiz.state === "QUESTION") {
+              nextState = "LEADERBOARD";
+          } else if (quiz.state === "LEADERBOARD") {
+              nextState = "QUESTION";
+              nextIndex = quiz.current_index + 1;
+              if (quiz.questions && nextIndex >= quiz.questions.length) {
+                  nextState = "END";
+              }
+          }
+          setQuiz({ ...quiz, state: nextState, current_index: nextIndex });
+      });
+
+      // Server Sync
       await apiCall("/quiz/next", "POST");
   });
 
   const handleCloseQuiz = () => handleAction(async () => {
+      handleOptimisticUpdate(() => setQuiz(null)); 
       await apiCall("/quiz/reset", "POST");
   });
   
@@ -155,7 +186,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const handleBanUser = async (userName: string) => {
     if (!confirm(`Are you sure you want to ban ${userName}?`)) return;
     await apiCall("/ban", "POST", { name: userName });
-    await syncState(); 
+    lastActionTime.current = 0; 
+    syncState(); 
   };
 
   const saveSettings = async () => {
@@ -167,6 +199,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   };
 
   const handleQuizCreated = () => {
+      lastActionTime.current = 0; 
       syncState();
   };
 
@@ -177,30 +210,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     setAiSummary("");
     
     let contextData: string[] = [];
-    
-    if (quiz) {
-       contextData = [`Active Quiz: ${quiz.title}`];
-    } else if (currentPoll) {
-       contextData = [`Poll Question: ${currentPoll.question}`];
-       
-       if (currentPoll.type === 'word_cloud' && (pollResults || currentPoll.words)) {
-           const words = pollResults || currentPoll.words || {};
-           contextData.push(`Words: ${Object.keys(words).join(", ")}`);
-       } else if (currentPoll.type === 'open_ended' && currentPoll.responses) {
-           contextData = [...currentPoll.responses];
-       } else if (currentPoll.options) {
-           (currentPoll.options as PollOption[]).forEach((opt) => {
-               const votes = pollResults?.[opt.label] ?? opt.votes ?? 0;
-               contextData.push(`${opt.label}: ${votes} votes`);
-           });
-       }
-    } else if (questions.length > 0) {
-       contextData = questions.map(q => `Q: ${q.text} (${q.votes} votes)`);
-    } else {
-       setAiSummary("Nothing active to analyze right now.");
-       setAnalyzing(false);
-       return;
-    }
+    if (quiz) contextData = [`Active Quiz: ${quiz.title}`];
+    else if (currentPoll) contextData = [`Poll Question: ${currentPoll.question}`];
 
     try {
         const res = await fetch(`${API_URL}/api/ai/summarize`, { 
@@ -241,14 +252,60 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       );
   }
 
-  // --- SAFE DATA ACCESS ---
+  // --- SAFE DATA ACCESS & NORMALIZATION ---
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const currentQ: any = (quiz && quiz.questions && quiz.questions[quiz.current_index]) ? quiz.questions[quiz.current_index] : null;
+  const rawQ: any = (quiz && quiz.questions && quiz.questions[quiz.current_index]) ? quiz.questions[quiz.current_index] : null;
+  
+  // NORMALIZE: Ensure we always have text and options regardless of what backend sent
+  const currentQ = rawQ ? {
+      text: rawQ.text || rawQ.question || "Unknown Question",
+      options: rawQ.options || rawQ.answers || [],
+      time_limit: rawQ.time_limit || 30
+  } : null;
 
   return (
     <div className={`min-h-screen bg-slate-950 text-white transition-all relative overflow-hidden flex flex-col font-sans ${isSidebar ? 'p-2' : 'p-4 sm:p-8'}`}>
       
       {!isSidebar && <ReactionOverlay />}
+
+      {/* --- DEBUGGER TOGGLE --- */}
+      <div className="fixed bottom-4 left-4 z-50">
+          <button 
+            onClick={() => setShowDebug(!showDebug)}
+            className="bg-red-600/20 hover:bg-red-600 text-red-200 hover:text-white text-xs px-3 py-1 rounded shadow-lg border border-red-500/50 transition backdrop-blur-md"
+          >
+            {showDebug ? "Hide Debug" : "🐞 Debug Data"}
+          </button>
+      </div>
+
+      {/* --- DEBUG OVERLAY (THE INSPECTOR) --- */}
+      {showDebug && (
+          <div className="fixed inset-0 bg-black/90 z-50 p-8 overflow-auto font-mono text-xs text-green-400 animate-in fade-in">
+              <div className="max-w-4xl mx-auto">
+                  <div className="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                      <h2 className="text-xl text-white font-bold">🔍 Live Data Inspector</h2>
+                      <button onClick={() => setShowDebug(false)} className="bg-red-600 text-white px-4 py-2 rounded font-bold hover:bg-red-500">CLOSE</button>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
+                          <h3 className="text-yellow-400 font-bold mb-4 text-sm uppercase tracking-wider">Current Quiz State</h3>
+                          <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(quiz, null, 2)}</pre>
+                      </div>
+                      <div className="space-y-6">
+                          <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
+                              <h3 className="text-blue-400 font-bold mb-4 text-sm uppercase tracking-wider">Raw Question Data</h3>
+                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(rawQ, null, 2)}</pre>
+                          </div>
+                          <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
+                              <h3 className="text-purple-400 font-bold mb-4 text-sm uppercase tracking-wider">Normalized for UI</h3>
+                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(currentQ, null, 2)}</pre>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
 
       {/* --- HEADER --- */}
       {!isSidebar && (
@@ -291,17 +348,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
         {!isSidebar && (
             <div className="lg:col-span-2 bg-slate-900/50 backdrop-blur-sm p-4 sm:p-8 rounded-2xl border border-slate-800 flex flex-col shadow-2xl relative overflow-y-auto custom-scrollbar min-h-[60vh]">
             
-            {/* DEBUGGER TOGGLE (Click to see raw data if stuck) */}
-            <div className="absolute bottom-2 left-2 z-50 opacity-20 hover:opacity-100 transition">
-                <button onClick={() => setShowDebug(!showDebug)} className="text-[10px] text-slate-500">🛠️ Debug</button>
-            </div>
-            {showDebug && (
-                <div className="absolute inset-0 bg-black/90 p-4 z-40 overflow-auto text-xs font-mono text-green-400">
-                    <pre>{JSON.stringify({ quiz, currentPoll, questions }, null, 2)}</pre>
-                    <button onClick={() => setShowDebug(false)} className="mt-4 bg-red-600 px-4 py-2 rounded text-white">Close Debugger</button>
-                </div>
-            )}
-
             {quiz ? (
                 <div className="flex flex-col h-full items-center justify-center text-center w-full animate-in fade-in zoom-in duration-300">
                     
@@ -354,16 +400,16 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 <>
                                 <div className="mb-8">
                                     <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8 animate-in slide-in-from-right-4 fade-in">
-                                        {currentQ.text || currentQ.question || "Mystery Question"}
+                                        {/* NORMALIZED TEXT RENDERING */}
+                                        {currentQ.text}
                                     </h3>
-                                    <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
+                                    <div className="bg-slate-800 h-3 rounded-full overflow-hidden relative w-full">
                                         <div 
                                             key={quiz.current_index} 
-                                            className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
+                                            className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left w-full" 
                                             /* webhint: ignore inline-styles */
                                             style={{ 
-                                                width: '100%', 
-                                                animation: `width_linear ${currentQ.time_limit || 30}s linear forwards` 
+                                                animation: `width_linear ${currentQ.time_limit}s linear forwards` 
                                             }}
                                         ></div>
                                     </div>
@@ -393,7 +439,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     <div className="w-8 h-8 border-4 border-slate-500 border-t-transparent rounded-full animate-spin"></div>
                                     <p className="italic">Synchronizing Question Data...</p>
                                     <button 
-                                        onClick={syncState} 
+                                        onClick={() => { lastActionTime.current = 0; syncState(); }} 
                                         className="text-xs bg-slate-800 px-4 py-2 rounded text-white hover:bg-slate-700 transition"
                                     >
                                         Force Sync 🔄
@@ -801,13 +847,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
           </div>
         </div>
       </main>
-
-      {/* --- DEBUG BAR (Hidden in Sidebar) --- */}
-      {!isSidebar && (
-          <div className="fixed bottom-1 left-1 text-[10px] text-slate-700 font-mono select-none pointer-events-none opacity-50">
-              Last Sync: {lastSync} | WS: {isConnected ? "OK" : "ERR"}
-          </div>
-      )}
 
       {/* --- MODALS --- */}
       
