@@ -69,6 +69,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const [aiSummary, setAiSummary] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [lastSync, setLastSync] = useState<Date>(new Date());
 
   // --- AUTH CHECK ---
   useEffect(() => {
@@ -97,24 +98,24 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
     }
   }, [code]);
 
-  // --- DUAL-SYNC ENGINE (The Fix for "Live Delay") ---
-  // Syncs state immediately, then creates a heartbeat to ensure 100% accuracy
+  // --- TURBO-SYNC ENGINE (1s Heartbeat) ---
   const syncState = useCallback(async () => {
       const data = await apiCall("/state");
       if (data) {
         if (data.quiz) setQuiz(data.quiz);
         if (data.current_poll) setPoll(data.current_poll);
         if (data.questions) setQuestions(data.questions);
+        setLastSync(new Date());
       }
   }, [apiCall, setQuiz, setPoll, setQuestions]);
 
   // 1. Initial Sync
   useEffect(() => { if(code) syncState(); }, [code, syncState]);
 
-  // 2. Heartbeat Sync (Every 4 seconds) - Guarantees "Best Sync"
+  // 2. High-Frequency Heartbeat (1s) - Ensures "Live" feel
   useEffect(() => {
       if (!code) return;
-      const interval = setInterval(syncState, 4000); 
+      const interval = setInterval(syncState, 1000); 
       return () => clearInterval(interval);
   }, [code, syncState]);
 
@@ -124,10 +125,16 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const handleAction = async (actionFn: () => Promise<void>) => {
     if (actionLoading) return;
     setActionLoading(true);
-    await actionFn();
-    // Force a sync immediately after any action to update UI instantly
-    await syncState();
-    setTimeout(() => setActionLoading(false), 300);
+    try {
+        await actionFn();
+        // Force a double-tap sync to ensure UI updates instantly
+        await syncState();
+        setTimeout(() => syncState(), 500); 
+    } catch (e) {
+        console.error("Action failed", e);
+    } finally {
+        setTimeout(() => setActionLoading(false), 300);
+    }
   };
 
   const endPoll = () => handleAction(() => apiCall("/poll/end", "POST"));
@@ -146,7 +153,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   const handleBanUser = async (userName: string) => {
     if (!confirm(`Are you sure you want to ban ${userName}?`)) return;
     await apiCall("/ban", "POST", { name: userName });
-    await syncState(); // Immediate refresh
+    await syncState(); 
   };
 
   const saveSettings = async () => {
@@ -338,7 +345,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                             {currentQ ? (
                                 <>
                                 <div className="mb-8">
-                                    <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8">
+                                    <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8 animate-in slide-in-from-right-4 fade-in">
                                         {/* SYSTEMATIC FIX: Handle both possible AI field names */}
                                         {currentQ.text || currentQ.question || "Mystery Question"}
                                     </h3>
@@ -378,7 +385,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                             ) : (
                                 <div className="flex flex-col items-center justify-center text-slate-500 gap-4">
                                     <div className="w-8 h-8 border-4 border-slate-500 border-t-transparent rounded-full animate-spin"></div>
-                                    <p className="italic">Loading question data...</p>
+                                    <p className="italic">Synchronizing Question Data...</p>
+                                    <button onClick={syncState} className="text-xs text-blue-400 hover:underline">Force Refresh</button>
                                 </div>
                             )}
                         </div>
@@ -782,6 +790,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
           </div>
         </div>
       </main>
+
+      {/* --- DEBUG BAR (Hidden in Sidebar) --- */}
+      {!isSidebar && (
+          <div className="fixed bottom-1 left-1 text-[10px] text-slate-700 font-mono select-none pointer-events-none opacity-50">
+              Synced: {lastSync.toLocaleTimeString()} | WS: {isConnected ? "OK" : "ERR"}
+          </div>
+      )}
 
       {/* --- MODALS --- */}
       
