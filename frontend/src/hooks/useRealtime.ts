@@ -1,11 +1,11 @@
+"use client";
+
 import { useEffect, useRef } from 'react';
 import { useSessionStore, Participant } from '@/store/sessionStore';
 import { useRouter } from 'next/navigation';
 
-// --- PATCH: SMART URL SELECTOR ---
-// 1. Get the HTTP URL (Cloud or Local)
+// --- SMART URL SELECTOR ---
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-// 2. Convert to WebSocket URL (http -> ws, https -> wss)
 const WS_URL = API_URL.replace(/^http/, 'ws'); 
 
 export function useRealtime(sessionCode: string, myName?: string | null) {
@@ -16,6 +16,7 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
   // Stable Store Selectors
   const setConnected = useSessionStore((s) => s.setConnected);
   const setPoll = useSessionStore((s) => s.setPoll);
+  const setPollResults = useSessionStore((s) => s.setPollResults); // ✅ ADDED: Needed for Sync
   const setQuestions = useSessionStore((s) => s.setQuestions);
   const setParticipants = useSessionStore((s) => s.setParticipants);
   const setQuiz = useSessionStore((s) => s.setQuiz);
@@ -24,15 +25,12 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
   const setBranding = useSessionStore((s) => s.setBranding);
 
   useEffect(() => {
-    // 1. Safety Check
     if (!sessionCode || sessionCode === "undefined" || myName === null) return;
 
     const connect = () => {
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
 
       const rolePath = myName ? encodeURIComponent(myName) : "presenter";
-      
-      // PATCH: Use the Smart WS_URL
       const wsUrl = `${WS_URL}/ws/${sessionCode}/${rolePath}`;
       
       console.log(`🔌 Connecting WS to ${wsUrl}`);
@@ -42,17 +40,18 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
         console.log('✅ WS Connected');
         setConnected(true);
         
-        // 2. Initial State Fetch
-        // PATCH: Use the Smart API_URL
+        // Initial State Fetch
         fetch(`${API_URL}/api/session/${sessionCode}/state`)
           .then(res => res.ok ? res.json() : null)
           .then(data => {
             if (!data) return;
             
+            // Sync Poll Data
             if (data.current_poll) setPoll(data.current_poll);
+            if (data.poll_results) setPollResults(data.poll_results); // ✅ Sync existing votes
+            
             if (data.questions) setQuestions(data.questions);
             
-            // Handle Participants: Check if string or object
             if (data.participants) {
                 const parts = (data.participants as Array<string | Participant>).map((p) => 
                     typeof p === 'string' ? { id: p, name: p } : p
@@ -63,6 +62,8 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
             if (data.quiz) {
                 setQuiz(data.quiz);
                 if (data.quiz_scores) setQuizScores(data.quiz_scores);
+            } else {
+                setQuiz(null);
             }
             if (data.branding) setBranding(data.branding);
           })
@@ -74,18 +75,28 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
           const data = JSON.parse(event.data);
 
           switch (data.type) {
+            // ✅ CASE 1: Poll Started (Reset Results)
             case 'POLL_START':
+              setPoll(data.payload);
+              setPollResults({}); 
+              break;
+
+            // ✅ CASE 2: Live Vote Received (Update Results)
+            case 'POLL_RESULTS_UPDATE':
+              if (data.payload) setPoll(data.payload);
+              if (data.results) setPollResults(data.results);
+              break;
+
             case 'POLL_UPDATE':
-              setPoll(data.payload || data.poll);
+              setPoll(data.payload);
+              if (!data.payload) setPollResults(null);
               break;
             
             case 'QNA_UPDATE':
-            case 'QUESTION_UPDATE':
-              setQuestions(data.payload || data.questions || []);
+              setQuestions(data.payload || []);
               break;
 
             case 'PARTICIPANT_UPDATE':
-              // Handle mixed formats safely
               const rawList = data.participants || data.names || data.payload || [];
               if (Array.isArray(rawList)) {
                   const cleanList = rawList.map((p: string | Participant) => 
@@ -107,7 +118,7 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
               const quizData = data.quiz || (data.payload ? data.payload.quiz : null) || data.payload;
               const scoreData = data.scores || (data.payload ? data.payload.scores : null);
               
-              if (quizData) setQuiz(quizData);
+              if (quizData !== undefined) setQuiz(quizData);
               if (scoreData) setQuizScores(scoreData);
               break;
 
@@ -126,7 +137,6 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
 
       ws.current.onclose = (e) => {
         setConnected(false);
-        // Only reconnect if we are still on the session page
         if (e.code !== 1000 && window.location.pathname.includes(sessionCode)) {
           console.log(`⚠️ WS Closed. Reconnecting in 3s...`);
           reconnectTimeout.current = setTimeout(connect, 3000);
@@ -140,5 +150,5 @@ export function useRealtime(sessionCode: string, myName?: string | null) {
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
       ws.current?.close();
     };
-  }, [sessionCode, myName, router, setConnected, setPoll, setQuestions, setParticipants, setQuiz, setQuizScores, setLastReaction, setBranding]);
+  }, [sessionCode, myName, router, setConnected, setPoll, setPollResults, setQuestions, setParticipants, setQuiz, setQuizScores, setLastReaction, setBranding]);
 }
