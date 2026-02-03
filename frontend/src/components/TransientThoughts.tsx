@@ -8,66 +8,69 @@ interface Bubble {
   left: number;
   speed: number;
   scale: number;
+  color: string;
 }
 
 export default function TransientThoughts({ responses }: { responses: string[] }) {
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
-  
-  // PATCH: Tracking state to prevent render loops
-  const processedCount = useRef(0);
-  const timeoutsRef = useRef<Set<NodeJS.Timeout>>(new Set());
+  const prevCountRef = useRef(0);
 
   useEffect(() => {
-    // 1. Safety Check: Only proceed if new responses have arrived
-    if (responses.length <= processedCount.current) return;
+    // 1. Sync Logic: Only trigger if we have *more* responses than before
+    if (responses.length > prevCountRef.current) {
+      const diff = responses.length - prevCountRef.current;
+      
+      // Backend prepends new items, so we take the top 'diff' items
+      const newThoughts = responses.slice(0, diff);
 
-    // 2. Data Extraction
-    const newestText = responses[0];
-    const newId = Date.now();
-    const speed = 4 + Math.random() * 3;
+      newThoughts.forEach((text, i) => {
+        const id = Date.now() + i;
+        const speed = 5 + Math.random() * 3; // Slower, smoother float
+        
+        // Randomize colors for visual variety
+        const colors = [
+            "from-blue-600 to-purple-600",
+            "from-pink-500 to-rose-500",
+            "from-amber-500 to-orange-600", 
+            "from-emerald-500 to-teal-600"
+        ];
+        const randomColor = colors[Math.floor(Math.random() * colors.length)];
 
-    const newBubble: Bubble = {
-      id: newId,
-      text: newestText,
-      left: Math.random() * 80 + 10,
-      speed: speed,
-      scale: Math.random() * 0.3 + 0.9
-    };
+        const newBubble: Bubble = {
+          id,
+          text,
+          left: Math.random() * 80 + 10, // Random X position (10% to 90%)
+          speed,
+          scale: 0.9 + Math.random() * 0.3,
+          color: randomColor
+        };
 
-    // 3. PATCH: Use requestAnimationFrame to prevent cascading render warnings
-    requestAnimationFrame(() => {
-      setBubbles((prev) => [...prev, newBubble]);
-      processedCount.current = responses.length;
-    });
+        // Add bubble to state
+        setBubbles((prev) => [...prev, newBubble]);
 
-    // 4. Cleanup Timer: Fixed variable name to 'setBubbles'
-    const timer = setTimeout(() => {
-      setBubbles((prev) => prev.filter((b) => b.id !== newId));
-      timeoutsRef.current.delete(timer);
-    }, speed * 1000);
+        // Self-Cleanup: Remove this specific bubble after its animation ends
+        setTimeout(() => {
+          setBubbles((prev) => prev.filter((b) => b.id !== id));
+        }, speed * 1000);
+      });
 
-    timeoutsRef.current.add(timer);
-
-    // 5. PATCH: Capture the current ref value for stable cleanup
-    const activeTimeouts = timeoutsRef.current;
-    return () => {
-      activeTimeouts.forEach(clearTimeout);
-      activeTimeouts.clear();
-    };
-  }, [responses]); // Dependency on responses is sufficient with ref check
+      // Update ref so we don't re-process these
+      prevCountRef.current = responses.length;
+    }
+  }, [responses]);
 
   return (
-    <div className="relative w-full h-96 overflow-hidden bg-slate-900/50 rounded-xl border border-slate-700">
+    <div className="relative w-full h-96 overflow-hidden bg-slate-900/50 rounded-xl border border-slate-700 backdrop-blur-sm">
       <style>{`
         @keyframes floatUp {
           0% { transform: translateY(100%) scale(0.5); opacity: 0; }
           10% { opacity: 1; transform: translateY(0) scale(1); }
-          90% { opacity: 1; }
-          100% { transform: translateY(-400px) scale(1.5); opacity: 0; }
+          80% { opacity: 1; }
+          100% { transform: translateY(-400px) scale(1.2); opacity: 0; }
         }
         .animate-float-thought {
           animation-name: floatUp;
-          animation-timing-function: linear;
+          animation-timing-function: ease-out;
           animation-fill-mode: forwards;
         }
       `}</style>
@@ -75,20 +78,23 @@ export default function TransientThoughts({ responses }: { responses: string[] }
       {bubbles.map((b) => (
         <div
           key={b.id}
-          className="absolute bottom-0 px-6 py-3 bg-linear-to-r from-blue-600 to-purple-600 rounded-full text-white font-bold shadow-lg animate-float-thought whitespace-nowrap z-10"
+          className={`absolute bottom-0 px-6 py-3 bg-linear-to-r ${b.color} rounded-full text-white font-bold shadow-xl animate-float-thought whitespace-nowrap z-10 border border-white/20`}
+          /* webhint: ignore inline-styles */
           style={{
             left: `${b.left}%`,
             animationDuration: `${b.speed}s`,
-            transform: `scale(${b.scale})`
+            transform: `scale(${b.scale})`,
           }}
         >
           {b.text}
         </div>
       ))}
       
+      {/* Empty State */}
       {responses.length === 0 && bubbles.length === 0 && (
-        <div className="absolute inset-0 flex items-center justify-center text-slate-500 italic">
-          Waiting for audience thoughts...
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 opacity-50 animate-pulse">
+          <span className="text-4xl mb-2">💭</span>
+          <span className="italic font-medium">Waiting for thoughts...</span>
         </div>
       )}
     </div>

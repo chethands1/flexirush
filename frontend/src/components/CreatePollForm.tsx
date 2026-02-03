@@ -2,9 +2,6 @@
 
 import { useState } from "react";
 
-// --- PATCH: SMART URL SELECTOR ---
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-
 interface CreatePollFormProps {
   sessionCode: string;
   onClose: () => void;
@@ -16,94 +13,113 @@ export default function CreatePollForm({ sessionCode, onClose }: CreatePollFormP
   const [options, setOptions] = useState(["Yes", "No"]);
   const [loading, setLoading] = useState(false);
 
+  const handleOptionChange = (index: number, value: string) => {
+    const newOptions = [...options];
+    newOptions[index] = value;
+    setOptions(newOptions);
+  };
+
+  const addOption = () => setOptions([...options, ""]);
+  const removeOption = (index: number) => setOptions(options.filter((_, i) => i !== index));
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!question.trim()) return;
     setLoading(true);
 
     try {
-      // Logic matches backend Pydantic model
-      const payload = {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      
+      // Strict Payload Construction
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const payload: any = {
         question,
         type,
-        options: type === "multiple_choice" 
-          ? options.map(opt => ({ label: opt, votes: 0 })) 
-          : [],
-        correct_option: null 
       };
 
-      // PATCH: Use API_URL here
-      const res = await fetch(`${API_URL}/api/session/${sessionCode}/poll/start`, {
+      if (type === "multiple_choice") {
+        payload.options = options.filter(o => o.trim()).map(o => ({ label: o, votes: 0 }));
+      } else {
+        // IMPORTANT: Backend expects empty list for these types
+        payload.options = []; 
+      }
+
+      await fetch(`${API_URL}/api/session/${sessionCode}/poll/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
-      if (!res.ok) {
-        const err = await res.json();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        alert(`Error: ${(err.detail as any)?.[0]?.msg || "Failed to start poll"}`);
-      } else {
-        onClose();
-      }
-    } catch {
-      alert("Network error. Is the backend running?");
+      onClose();
+    } catch (error) {
+      console.error(error);
+      alert("Failed to start poll");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
-      <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md shadow-2xl">
-        <h2 className="text-xl font-bold mb-4 text-white">Create Poll</h2>
+    <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 p-4 animate-in fade-in backdrop-blur-sm">
+      <div className="bg-slate-900 w-full max-w-lg rounded-2xl border border-slate-700 shadow-2xl overflow-hidden">
+        <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+            <h2 className="text-xl font-bold text-white flex items-center gap-2">📊 Create Poll</h2>
+            <button onClick={onClose} className="text-slate-400 hover:text-white transition font-bold text-xl">×</button>
+        </div>
         
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="p-6 space-y-6">
           <div>
-            <label htmlFor="poll-question" className="text-xs font-bold text-slate-500 uppercase">Question</label>
+            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-2">Question</label>
             <input 
-              id="poll-question"
-              className="w-full bg-slate-800 p-3 rounded-lg text-white border border-slate-700 mt-1 focus:ring-2 focus:ring-blue-500 outline-none"
-              placeholder="What do you think?"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              required
+              value={question} 
+              onChange={(e) => setQuestion(e.target.value)} 
+              className="w-full bg-slate-800 border border-slate-700 p-4 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500 transition placeholder:text-slate-600" 
+              placeholder="What would you like to ask?" 
+              autoFocus
             />
           </div>
 
           <div>
-            <label htmlFor="poll-type" className="text-xs font-bold text-slate-500 uppercase">Type</label>
-            <select 
-              id="poll-type"
-              aria-label="Poll Type"
-              className="w-full bg-slate-800 p-3 rounded-lg text-white border border-slate-700 mt-1"
-              value={type}
-              onChange={(e) => setType(e.target.value)}
-            >
-              <option value="multiple_choice">Multiple Choice</option>
-              <option value="word_cloud">Word Cloud</option>
-              <option value="rating">Rating (1-5)</option>
-              <option value="open_ended">Open Ended</option>
-            </select>
+            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest block mb-2">Poll Type</label>
+            <div className="grid grid-cols-2 gap-2">
+                {[
+                    {id: 'multiple_choice', label: 'Multiple Choice', icon: '📊'},
+                    {id: 'rating', label: 'Star Rating', icon: '⭐'},
+                    {id: 'word_cloud', label: 'Word Cloud', icon: '☁️'},
+                    {id: 'open_ended', label: 'Open Ended', icon: '💬'}
+                ].map(t => (
+                    <button 
+                        key={t.id}
+                        type="button"
+                        onClick={()=>setType(t.id)}
+                        className={`p-3 rounded-lg border text-sm font-bold flex items-center gap-2 transition ${type===t.id ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700'}`}
+                    >
+                        <span>{t.icon}</span> {t.label}
+                    </button>
+                ))}
+            </div>
           </div>
 
           {type === "multiple_choice" && (
-            <div>
-              <label htmlFor="poll-options" className="text-xs font-bold text-slate-500 uppercase">Options (comma separated)</label>
-              <input 
-                id="poll-options"
-                className="w-full bg-slate-800 p-3 rounded-lg text-white border border-slate-700 mt-1"
-                placeholder="Yes, No, Maybe"
-                value={options.join(", ")}
-                onChange={(e) => setOptions(e.target.value.split(",").map(s => s.trim()))}
-                required
-              />
+            <div className="space-y-3 bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+              <label className="text-xs font-bold text-slate-500 uppercase">Options</label>
+              {options.map((opt, i) => (
+                <div key={i} className="flex gap-2">
+                  <input 
+                    value={opt} 
+                    onChange={(e) => handleOptionChange(i, e.target.value)} 
+                    className="flex-1 bg-slate-900 border border-slate-700 p-3 rounded-lg text-sm text-white focus:border-blue-500 outline-none" 
+                    placeholder={`Option ${i + 1}`} 
+                  />
+                  {options.length > 2 && <button type="button" onClick={() => removeOption(i)} className="text-red-500 hover:bg-red-900/20 px-3 rounded">✕</button>}
+                </div>
+              ))}
+              <button type="button" onClick={addOption} className="text-xs text-blue-400 font-bold hover:underline">+ Add Option</button>
             </div>
           )}
 
-          <div className="flex gap-3 pt-4">
-            <button type="button" onClick={onClose} className="flex-1 py-3 text-slate-400 hover:bg-slate-800 rounded-lg font-bold">Cancel</button>
-            <button type="submit" disabled={loading} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold shadow-lg">
-              {loading ? "Launching..." : "Launch Poll 🚀"}
+          <div className="pt-2">
+            <button type="submit" disabled={loading || !question.trim()} className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold py-4 rounded-xl shadow-lg transition transform active:scale-[0.98]">
+                {loading ? "Launching..." : "🚀 Launch Poll"}
             </button>
           </div>
         </form>
