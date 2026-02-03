@@ -40,9 +40,9 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   } = useSessionStore();
 
   // --- PERSISTENCE: CHECK LOCALSTORAGE ---
+  // This ensures votes aren't lost on refresh
   useEffect(() => {
-      // Logic: If poll question changes, reset vote state.
-      // But if same question, check localStorage.
+      // Create a unique key for the current activity (Poll Question OR Quiz Question Index)
       const activityKey = currentPoll 
           ? `poll_${code}_${currentPoll.question}` 
           : quiz 
@@ -53,9 +53,11 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
           const alreadyVoted = localStorage.getItem(activityKey);
           if (alreadyVoted) {
               setHasVoted(true);
+              // Try to restore selected option (visual feedback)
               const savedOption = localStorage.getItem(activityKey + "_opt");
               if (savedOption) setSelectedOption(Number(savedOption));
           } else {
+              // New activity detected: Reset state
               setHasVoted(false);
               setSelectedOption(null);
               setPollAnswer("");
@@ -63,7 +65,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       } else {
           setHasVoted(false);
       }
-  }, [currentPoll, quiz, code]);
+  }, [currentPoll, quiz, code]); 
 
   // --- HELPER: MARK AS VOTED ---
   const markAsVoted = (optionIndex?: number) => {
@@ -130,12 +132,15 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       }
   };
 
+  // --- HANDLER: POLL VOTE ---
   const handlePollVote = async (value: string | number) => {
       if (hasVoted) return;
+      // Sends { "value": "A" } or { "value": 5 } matching the new Backend Model
       const success = await apiCall("/vote", { value });
       if (success) markAsVoted();
   };
 
+  // --- HANDLER: QUIZ ANSWER ---
   const handleQuizAnswer = async (index: number) => {
       if (hasVoted || !user) return;
       setSelectedOption(index);
@@ -212,7 +217,8 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       </header>
 
       <main className="flex-1 flex flex-col p-4 max-w-md mx-auto w-full justify-center">
-            {/* QUIZ VIEW */}
+            
+            {/* --- SCENARIO 1: QUIZ --- */}
             {quiz && quiz.state !== "END" && (
                 <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
                     <div className="text-center mb-8">
@@ -282,7 +288,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                 </div>
             )}
 
-            {/* POLL VIEW */}
+            {/* --- SCENARIO 2: POLL --- */}
             {!quiz && currentPoll && (
                 <div className="w-full space-y-8 animate-in fade-in zoom-in duration-300">
                     <div className="text-center mb-4">
@@ -342,7 +348,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                 </div>
             )}
 
-            {/* WAITING VIEW */}
+            {/* --- SCENARIO 3: WAITING --- */}
             {!quiz && !currentPoll && (
                 <div className="text-center py-20 text-slate-500 animate-pulse">
                     <div className="text-7xl mb-6 grayscale opacity-20">☕</div>

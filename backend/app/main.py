@@ -8,94 +8,57 @@ import os
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 import random
 import uuid
 import io
 import csv
 import datetime
 import contextlib
-import re
 import asyncio
 
 load_dotenv()
 
 # --- GLOBAL SETTINGS ---
-# We default to 1.5-flash because it is the most stable for JSON generation.
-ACTIVE_MODEL = "gemini-1.5-flash" 
+ACTIVE_MODEL = "gemini-1.5-flash"
 client = None
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Startup Logic: Checks available models but prioritizes stability.
-    """
-    global ACTIVE_MODEL
     global client
-    
     api_key = os.getenv("GOOGLE_API_KEY")
     if api_key:
         try:
             client = genai.Client(api_key=api_key)
-            print("✅ AI Provider initialized")
-            
-            print("🔍 Checking available Gemini models...")
-            # We restore your advanced model checking, but changed priority
-            # to avoid 'gemini-2.0' which causes the JSON bugs.
-            available_models = []
-            try:
-                for m in client.models.list():
-                    if "generateContent" in (m.supported_actions or []):
-                        model_id = m.name.replace("models/", "")
-                        available_models.append(model_id)
-                
-                # RESTORED: Your priority order (Modified for stability)
-                # 1.5-flash is strictly better for JSON formatted output currently
-                priority_order = [
-                    "gemini-1.5-flash",        # 🥇 Best for JSON
-                    "gemini-2.0-flash-lite",
-                    "gemini-1.5-pro",
-                    "gemini-2.0-flash",        # ⚠️ Can be unstable with JSON
-                ]
-
-                for candidate in priority_order:
-                    if candidate in available_models:
-                        ACTIVE_MODEL = candidate
-                        print(f"✅ Selected Best Model: {ACTIVE_MODEL}")
-                        break
-                else:
-                    print(f"⚠️ No preferred model found. Defaulting to: {ACTIVE_MODEL}")
-
-            except Exception as e:
-                print(f"⚠️ Model List Failed (Using Default): {e}")
-                
+            print(f"✅ AI Provider initialized: {ACTIVE_MODEL}")
         except Exception as e:
             print(f"⚠️ AI Init Failed: {e}")
-            
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-# --- RESTORED: SPECIFIC CORS DOMAINS ---
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://flexirush.vercel.app",
-        "https://www.flexirush.com",
-        "https://flexirush.com",
-        "*" # Keep wildcard for development ease, remove if strict security needed
-    ],
+    allow_origins=["*"], # Wildcard for maximum compatibility
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Connect to Redis
 redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
 redis_client = redis.from_url(redis_url, decode_responses=True)
 
 # --- MODELS ---
+
+# ✅ FIX 1: Defined strict model for Voting to prevent 422 Errors
+class VoteRequest(BaseModel):
+    value: Union[str, int] 
+
+# ✅ FIX 2: Moved QnAPost up so it is defined before use
+class QnAPost(BaseModel):
+    text: str
+
 class UserAuth(BaseModel):
     email: str
     password: str
@@ -108,12 +71,8 @@ class Poll(BaseModel):
     type: str 
     options: Optional[List[Dict[str, Any]]] = []
     correct_option: Optional[int] = None
-    # RESTORED: Chat Parser support
     words: Optional[Dict[str, int]] = {} 
     responses: Optional[List[str]] = []
-
-class QnAPost(BaseModel):
-    text: str
 
 class QuizStart(BaseModel):
     title: str
@@ -242,11 +201,13 @@ async def start_poll(code: str, poll: Poll):
     data['current_poll'] = poll.dict()
     data['poll_results'] = {} 
     
+    # Initialize zero counts for multiple choice to show empty bars
     if poll.type == 'multiple_choice':
         for opt in poll.options: data['poll_results'][opt['label']] = 0
         
     await save_session_data(code, data)
-    # FIX: Broadcast full results for instant sync
+    
+    # ✅ FIX 3: Broadcast FULL payload so frontend syncs immediately
     await manager.broadcast(code, {
         "type": "POLL_START", 
         "payload": poll.dict(),
@@ -263,45 +224,50 @@ async def end_poll(code: str):
     await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": None, "results": {}})
     return {"status": "ended"}
 
+# ✅ FIX 4: Replaced raw Body with VoteRequest model to fix 422 Error
 @app.post("/api/session/{code}/vote")
-async def vote(code: str, value: str = Body(..., embed=True)): 
+async def vote(code: str, req: VoteRequest): 
     data = await get_session_data(code)
     if not data or not data.get('current_poll'): return {"error": "No poll"}
     
     poll = data['current_poll']
     poll_type = poll['type']
+    value = req.value # Extract value from the Pydantic model
     
     if poll_type == 'multiple_choice':
-        # Try exact match first
-        if value in data['poll_results']:
-            data['poll_results'][value] += 1
+        val_str = str(value)
+        # Handle case sensitivity or existing keys
+        if val_str in data['poll_results']:
+            data['poll_results'][val_str] += 1
         else:
-            # Fallback for old clients
-            data['poll_results'][value] = 1
+            data['poll_results'][val_str] = 1
 
     elif poll_type == 'rating':
-        data['poll_results'][str(value)] = data['poll_results'].get(str(value), 0) + 1
+        val_str = str(value)
+        data['poll_results'][val_str] = data['poll_results'].get(val_str, 0) + 1
+        
+        # Recalculate average live
         total_score = sum(int(k)*v for k,v in data['poll_results'].items())
         total_votes = sum(data['poll_results'].values())
         poll['average'] = round(total_score / total_votes, 1) if total_votes > 0 else 0
 
-    elif poll_type in ['word_cloud', 'open_ended']:
+    elif poll_type == 'word_cloud':
+        val = str(value).strip().lower()
+        if val: 
+            data['poll_results'][val] = data['poll_results'].get(val, 0) + 1
+            
+    elif poll_type == 'open_ended':
         val = str(value).strip()
-        if not val: return
-        
-        if poll_type == 'word_cloud':
-            key = val.lower()
-            data['poll_results'][key] = data['poll_results'].get(key, 0) + 1
-        else:
-            if 'responses' not in poll: poll['responses'] = []
-            poll['responses'].insert(0, val)
+        if 'responses' not in poll: poll['responses'] = []
+        if val: poll['responses'].insert(0, val)
 
     await save_session_data(code, data)
-    # FIX: Broadcast full results updates
+    
+    # ✅ FIX 5: Broadcast POLL_RESULTS_UPDATE with full results
     await manager.broadcast(code, {
         "type": "POLL_RESULTS_UPDATE", 
-        "payload": poll,
-        "results": data['poll_results']
+        "payload": poll, # Contains updated average/responses
+        "results": data['poll_results'] # Contains vote counts
     })
     return {"status": "recorded"}
 
@@ -309,6 +275,7 @@ async def vote(code: str, value: str = Body(..., embed=True)):
 async def add_q(code: str, q: QnAPost):
     data = await get_session_data(code)
     new_q = {"id": str(uuid.uuid4()), "text": q.text, "votes": 0, "visible": True}
+    if 'questions' not in data: data['questions'] = []
     data['questions'].append(new_q)
     await save_session_data(code, data)
     await manager.broadcast(code, {"type": "QNA_UPDATE", "payload": data['questions']})
@@ -342,18 +309,14 @@ async def export_results(code: str):
     writer.writerow([])
     writer.writerow(["Type", "Question/Content", "Value", "Count/Score"])
     
-    if data['poll_results']:
+    if data.get('poll_results'):
         for k, v in data['poll_results'].items():
             writer.writerow(["Poll", "Live Vote", k, v])
             
-    if data['current_poll'] and data['current_poll'].get('words'):
-        for k, v in data['current_poll']['words'].items():
-            writer.writerow(["Chat", "Parsed Word", k, v])
-            
-    for q in data['questions']:
+    for q in data.get('questions', []):
         writer.writerow(["Q&A", q['text'], "-", q['votes']])
         
-    for user, score in data['quiz_scores'].items():
+    for user, score in data.get('quiz_scores', {}).items():
         writer.writerow(["Quiz Score", "User", user, score])
         
     output.seek(0)
@@ -363,7 +326,7 @@ async def export_results(code: str):
         headers={"Content-Disposition": f"attachment; filename=flexirush_{code}.csv"}
     )
 
-# --- AI ROUTES (FIXED: RETRY LOGIC) ---
+# --- AI ROUTES ---
 
 @app.post("/api/ai/summarize")
 async def summarize(req: SummarizeRequest):
@@ -385,8 +348,7 @@ async def gen_quiz(req: AIRequest):
     Return STRICT JSON only. No markdown.
     Structure: {{ "title": "Quiz Title", "questions": [ {{ "text": "Q?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
 
-    # --- RETRY LOOP (Crucial for Stability) ---
-    # Tries 3 times to get valid JSON before giving up
+    # --- RETRY LOOP ---
     for attempt in range(3):
         try:
             print(f"🧠 AI Attempt {attempt+1} using {ACTIVE_MODEL} for: {req.prompt}")
@@ -399,7 +361,6 @@ async def gen_quiz(req: AIRequest):
             )
             data = json.loads(res.text)
             
-            # Verify data integrity
             if "questions" in data and len(data["questions"]) > 0:
                 print(f"✅ Success on attempt {attempt+1}")
                 return data
@@ -408,7 +369,7 @@ async def gen_quiz(req: AIRequest):
                 
         except Exception as e:
             print(f"❌ Attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(1) # Backoff
+            await asyncio.sleep(1)
 
     print("❌ All AI attempts failed.")
     return {"title": "Error", "questions": []}
@@ -421,11 +382,10 @@ async def brand(code: str, req: BrandingRequest):
     await manager.broadcast(code, {"type": "BRANDING_UPDATE", "payload": data['branding']})
     return {"status": "ok"}
 
-# --- QUIZ ENDPOINTS (SECURED) ---
+# --- QUIZ ENDPOINTS ---
 
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
-    # --- FIREWALL: REJECTS EMPTY QUIZZES ---
     if not quiz.questions or len(quiz.questions) == 0:
         print(f"⚠️ Blocked corrupted quiz start for session {code}")
         raise HTTPException(status_code=400, detail="Cannot start quiz: No questions generated.")
