@@ -16,6 +16,7 @@ import csv
 import datetime
 import contextlib
 import asyncio
+import re  # ✅ ADDED: Required for JSON cleaning
 
 load_dotenv()
 
@@ -130,6 +131,14 @@ async def get_session_data(code: str):
 async def save_session_data(code: str, data: dict):
     await redis_client.set(f"session:{code}", json.dumps(data), ex=86400) # 24 hours
 
+# ✅ FIX 3: AI Output Cleaner to handle Markdown blocks
+def clean_json_text(text: str) -> str:
+    """Removes markdown code blocks to ensure valid JSON parsing."""
+    # Remove ```json ... ``` or just ``` ... ```
+    cleaned = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"```\s*", "", cleaned)
+    return cleaned.strip()
+
 # --- ROUTES ---
 
 @app.get("/")
@@ -207,7 +216,7 @@ async def start_poll(code: str, poll: Poll):
         
     await save_session_data(code, data)
     
-    # ✅ FIX 3: Broadcast FULL payload so frontend syncs immediately
+    # ✅ FIX 4: Broadcast FULL payload so frontend syncs immediately
     await manager.broadcast(code, {
         "type": "POLL_START", 
         "payload": poll.dict(),
@@ -224,7 +233,7 @@ async def end_poll(code: str):
     await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": None, "results": {}})
     return {"status": "ended"}
 
-# ✅ FIX 4: Replaced raw Body with VoteRequest model to fix 422 Error
+# ✅ FIX 5: Replaced raw Body with VoteRequest model to fix 422 Error
 @app.post("/api/session/{code}/vote")
 async def vote(code: str, req: VoteRequest): 
     data = await get_session_data(code)
@@ -263,7 +272,7 @@ async def vote(code: str, req: VoteRequest):
 
     await save_session_data(code, data)
     
-    # ✅ FIX 5: Broadcast POLL_RESULTS_UPDATE with full results
+    # ✅ FIX 6: Broadcast POLL_RESULTS_UPDATE with full results
     await manager.broadcast(code, {
         "type": "POLL_RESULTS_UPDATE", 
         "payload": poll, # Contains updated average/responses
@@ -345,7 +354,7 @@ async def gen_quiz(req: AIRequest):
     if not client: return {"questions": []}
     
     prompt = f"""Generate a 5-question trivia quiz about "{req.prompt}".
-    Return STRICT JSON only. No markdown.
+    Return ONLY raw JSON. Do not use Markdown formatting.
     Structure: {{ "title": "Quiz Title", "questions": [ {{ "text": "Q?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
 
     # --- RETRY LOOP ---
@@ -359,7 +368,10 @@ async def gen_quiz(req: AIRequest):
                     response_mime_type="application/json"
                 )
             )
-            data = json.loads(res.text)
+            
+            # ✅ FIX 7: Clean the output before parsing to handle Markdown blocks
+            raw_text = clean_json_text(res.text)
+            data = json.loads(raw_text)
             
             if "questions" in data and len(data["questions"]) > 0:
                 print(f"✅ Success on attempt {attempt+1}")

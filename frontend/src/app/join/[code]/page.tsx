@@ -40,20 +40,21 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   } = useSessionStore();
 
   // --- PERSISTENCE: CHECK LOCALSTORAGE ---
-  // This ensures votes aren't lost on refresh
+  // ✅ FIX: Enhanced Key Generation to prevent "Already Voted" on new quizzes
   useEffect(() => {
-      // Create a unique key for the current activity (Poll Question OR Quiz Question Index)
-      const activityKey = currentPoll 
-          ? `poll_${code}_${currentPoll.question}` 
-          : quiz 
-              ? `quiz_${code}_${quiz.current_index}` 
-              : null;
+      let activityKey = null;
+
+      if (currentPoll) {
+          activityKey = `poll_${code}_${currentPoll.question}`;
+      } else if (quiz) {
+          // Include Quiz Title to differentiate "Math Quiz" Q1 from "Science Quiz" Q1
+          activityKey = `quiz_${code}_${quiz.title}_${quiz.current_index}`;
+      }
 
       if (activityKey) {
           const alreadyVoted = localStorage.getItem(activityKey);
           if (alreadyVoted) {
               setHasVoted(true);
-              // Try to restore selected option (visual feedback)
               const savedOption = localStorage.getItem(activityKey + "_opt");
               if (savedOption) setSelectedOption(Number(savedOption));
           } else {
@@ -69,11 +70,13 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
   // --- HELPER: MARK AS VOTED ---
   const markAsVoted = (optionIndex?: number) => {
-      const activityKey = currentPoll 
-          ? `poll_${code}_${currentPoll.question}` 
-          : quiz 
-              ? `quiz_${code}_${quiz.current_index}` 
-              : null;
+      let activityKey = null;
+
+      if (currentPoll) {
+          activityKey = `poll_${code}_${currentPoll.question}`;
+      } else if (quiz) {
+          activityKey = `quiz_${code}_${quiz.title}_${quiz.current_index}`;
+      }
       
       if (activityKey) {
           localStorage.setItem(activityKey, "true");
@@ -118,9 +121,8 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
           if (res.ok) {
               const data = await res.json();
-              // Save Guest User to Store
               setUser({ id: data.id, email: data.name }); 
-              setToken("guest-token"); // Fake token to satisfy auth checks
+              setToken("guest-token");
           } else {
               alert("Failed to join session. Code might be wrong.");
           }
@@ -132,15 +134,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       }
   };
 
-  // --- HANDLER: POLL VOTE ---
   const handlePollVote = async (value: string | number) => {
       if (hasVoted) return;
-      // Sends { "value": "A" } or { "value": 5 } matching the new Backend Model
       const success = await apiCall("/vote", { value });
       if (success) markAsVoted();
   };
 
-  // --- HANDLER: QUIZ ANSWER ---
   const handleQuizAnswer = async (index: number) => {
       if (hasVoted || !user) return;
       setSelectedOption(index);
@@ -166,7 +165,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
   if (!resolvedParams) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">Loading...</div>;
 
-  // --- VIEW: GUEST JOIN FORM ---
   if (!user) {
       return (
           <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white">
@@ -176,7 +174,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                       <h1 className="text-3xl font-bold mb-2">Join Session</h1>
                       <p className="text-slate-400 text-sm">Enter your name to join the activity.</p>
                   </div>
-                  
                   <form onSubmit={handleJoinSession} className="space-y-6">
                       <div>
                           <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">Your Name</label>
@@ -202,7 +199,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       );
   }
 
-  // --- VIEW: ACTIVE SESSION ---
   return (
     <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col">
       <header className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 backdrop-blur-md sticky top-0 z-10">
@@ -217,8 +213,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       </header>
 
       <main className="flex-1 flex flex-col p-4 max-w-md mx-auto w-full justify-center">
-            
-            {/* --- SCENARIO 1: QUIZ --- */}
             {quiz && quiz.state !== "END" && (
                 <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
                     <div className="text-center mb-8">
@@ -282,13 +276,11 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                                 <p className="text-6xl font-mono font-bold text-white tracking-tighter">{quizScores[user.email || "Anonymous"] || 0}</p>
                                 <p className="text-slate-500 text-xs mt-2">pts</p>
                             </div>
-                            <p className="text-slate-500 text-sm">Look at the big screen for rankings!</p>
                         </div>
                     )}
                 </div>
             )}
 
-            {/* --- SCENARIO 2: POLL --- */}
             {!quiz && currentPoll && (
                 <div className="w-full space-y-8 animate-in fade-in zoom-in duration-300">
                     <div className="text-center mb-4">
@@ -348,7 +340,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                 </div>
             )}
 
-            {/* --- SCENARIO 3: WAITING --- */}
             {!quiz && !currentPoll && (
                 <div className="text-center py-20 text-slate-500 animate-pulse">
                     <div className="text-7xl mb-6 grayscale opacity-20">☕</div>
