@@ -16,7 +16,7 @@ import csv
 import datetime
 import contextlib
 import asyncio
-import re  # ✅ ADDED: Required for JSON cleaning
+import re
 
 load_dotenv()
 
@@ -27,8 +27,12 @@ client = None
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global client
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if api_key:
+    # ✅ FIX: Look for GEMINI_API_KEY (your setup) OR GOOGLE_API_KEY (standard)
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    
+    if not api_key:
+        print("❌ CRITICAL ERROR: AI API Key is missing! Please set GEMINI_API_KEY in Render.")
+    else:
         try:
             client = genai.Client(api_key=api_key)
             print(f"✅ AI Provider initialized: {ACTIVE_MODEL}")
@@ -41,7 +45,7 @@ app = FastAPI(lifespan=lifespan)
 # --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Wildcard for maximum compatibility
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,12 +55,9 @@ redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
 redis_client = redis.from_url(redis_url, decode_responses=True)
 
 # --- MODELS ---
-
-# ✅ FIX 1: Defined strict model for Voting to prevent 422 Errors
 class VoteRequest(BaseModel):
     value: Union[str, int] 
 
-# ✅ FIX 2: Moved QnAPost up so it is defined before use
 class QnAPost(BaseModel):
     text: str
 
@@ -129,15 +130,19 @@ async def get_session_data(code: str):
     return json.loads(data) if data else None
 
 async def save_session_data(code: str, data: dict):
-    await redis_client.set(f"session:{code}", json.dumps(data), ex=86400) # 24 hours
+    await redis_client.set(f"session:{code}", json.dumps(data), ex=86400)
 
-# ✅ FIX 3: AI Output Cleaner to handle Markdown blocks
-def clean_json_text(text: str) -> str:
-    """Removes markdown code blocks to ensure valid JSON parsing."""
-    # Remove ```json ... ``` or just ``` ... ```
-    cleaned = re.sub(r"```json\s*", "", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"```\s*", "", cleaned)
-    return cleaned.strip()
+# ✅ FIX 3: Surgical JSON Extractor (Robust against AI chatter)
+def extract_json(text: str) -> str:
+    """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
+    try:
+        start = text.find('{')
+        end = text.rfind('}')
+        if start != -1 and end != -1:
+            return text[start:end+1]
+        return text # Return original if braces not found (fallback)
+    except:
+        return text
 
 # --- ROUTES ---
 
@@ -210,13 +215,10 @@ async def start_poll(code: str, poll: Poll):
     data['current_poll'] = poll.dict()
     data['poll_results'] = {} 
     
-    # Initialize zero counts for multiple choice to show empty bars
     if poll.type == 'multiple_choice':
         for opt in poll.options: data['poll_results'][opt['label']] = 0
         
     await save_session_data(code, data)
-    
-    # ✅ FIX 4: Broadcast FULL payload so frontend syncs immediately
     await manager.broadcast(code, {
         "type": "POLL_START", 
         "payload": poll.dict(),
@@ -233,7 +235,6 @@ async def end_poll(code: str):
     await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": None, "results": {}})
     return {"status": "ended"}
 
-# ✅ FIX 5: Replaced raw Body with VoteRequest model to fix 422 Error
 @app.post("/api/session/{code}/vote")
 async def vote(code: str, req: VoteRequest): 
     data = await get_session_data(code)
@@ -241,11 +242,10 @@ async def vote(code: str, req: VoteRequest):
     
     poll = data['current_poll']
     poll_type = poll['type']
-    value = req.value # Extract value from the Pydantic model
+    value = req.value
     
     if poll_type == 'multiple_choice':
         val_str = str(value)
-        # Handle case sensitivity or existing keys
         if val_str in data['poll_results']:
             data['poll_results'][val_str] += 1
         else:
@@ -254,8 +254,6 @@ async def vote(code: str, req: VoteRequest):
     elif poll_type == 'rating':
         val_str = str(value)
         data['poll_results'][val_str] = data['poll_results'].get(val_str, 0) + 1
-        
-        # Recalculate average live
         total_score = sum(int(k)*v for k,v in data['poll_results'].items())
         total_votes = sum(data['poll_results'].values())
         poll['average'] = round(total_score / total_votes, 1) if total_votes > 0 else 0
@@ -271,12 +269,10 @@ async def vote(code: str, req: VoteRequest):
         if val: poll['responses'].insert(0, val)
 
     await save_session_data(code, data)
-    
-    # ✅ FIX 6: Broadcast POLL_RESULTS_UPDATE with full results
     await manager.broadcast(code, {
         "type": "POLL_RESULTS_UPDATE", 
-        "payload": poll, # Contains updated average/responses
-        "results": data['poll_results'] # Contains vote counts
+        "payload": poll,
+        "results": data['poll_results']
     })
     return {"status": "recorded"}
 
@@ -335,7 +331,7 @@ async def export_results(code: str):
         headers={"Content-Disposition": f"attachment; filename=flexirush_{code}.csv"}
     )
 
-# --- AI ROUTES ---
+# --- AI ROUTES (FIXED & LOGGED) ---
 
 @app.post("/api/ai/summarize")
 async def summarize(req: SummarizeRequest):
@@ -347,20 +343,23 @@ async def summarize(req: SummarizeRequest):
         )
         return {"summary": response.text}
     except Exception as e:
+        print(f"❌ Summarize Failed: {e}")
         return {"summary": "AI is unavailable right now."}
 
 @app.post("/api/ai/generate-quiz")
 async def gen_quiz(req: AIRequest):
-    if not client: return {"questions": []}
+    if not client: 
+        print("❌ AI Generation Failed: Client is None. Check GOOGLE_API_KEY.")
+        return {"questions": []}
     
+    # Very strict prompt
     prompt = f"""Generate a 5-question trivia quiz about "{req.prompt}".
-    Return ONLY raw JSON. Do not use Markdown formatting.
-    Structure: {{ "title": "Quiz Title", "questions": [ {{ "text": "Q?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
+    Return raw JSON only. NO Markdown. NO backticks.
+    Format: {{ "title": "Quiz Title", "questions": [ {{ "text": "Q?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
 
-    # --- RETRY LOOP ---
     for attempt in range(3):
         try:
-            print(f"🧠 AI Attempt {attempt+1} using {ACTIVE_MODEL} for: {req.prompt}")
+            print(f"🧠 AI Attempt {attempt+1} for: {req.prompt}")
             res = client.models.generate_content(
                 model=ACTIVE_MODEL,
                 contents=prompt,
@@ -369,21 +368,20 @@ async def gen_quiz(req: AIRequest):
                 )
             )
             
-            # ✅ FIX 7: Clean the output before parsing to handle Markdown blocks
-            raw_text = clean_json_text(res.text)
+            # ✅ FIX: Extract JSON from mixed text
+            raw_text = extract_json(res.text)
             data = json.loads(raw_text)
             
             if "questions" in data and len(data["questions"]) > 0:
-                print(f"✅ Success on attempt {attempt+1}")
+                print(f"✅ AI Success!")
                 return data
             else:
-                print(f"⚠️ Attempt {attempt+1} returned empty questions.")
+                print(f"⚠️ AI returned empty questions: {raw_text}")
                 
         except Exception as e:
-            print(f"❌ Attempt {attempt+1} failed: {e}")
+            print(f"❌ AI Attempt {attempt+1} Failed: {e}")
             await asyncio.sleep(1)
 
-    print("❌ All AI attempts failed.")
     return {"title": "Error", "questions": []}
 
 @app.post("/api/session/{code}/branding")
@@ -399,7 +397,6 @@ async def brand(code: str, req: BrandingRequest):
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
     if not quiz.questions or len(quiz.questions) == 0:
-        print(f"⚠️ Blocked corrupted quiz start for session {code}")
         raise HTTPException(status_code=400, detail="Cannot start quiz: No questions generated.")
     
     data = await get_session_data(code)
