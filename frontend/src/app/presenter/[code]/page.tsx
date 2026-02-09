@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Image from "next/image";
 import dynamic from "next/dynamic";
+import Script from "next/script"; // ✅ IMPORT SCRIPT HERE
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSessionStore, Question } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
@@ -22,7 +23,6 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 export default function PresenterDashboard({ params }: { params: Promise<{ code: string }> }) {
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
   const searchParams = useSearchParams();
-  // SIDEBAR MODE: Essential for PowerPoint integration
   const isSidebar = searchParams.get("sidebar") === "true";
 
   // Debug State
@@ -301,6 +301,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   return (
     <div className={`min-h-screen bg-slate-950 text-white transition-all relative overflow-hidden flex flex-col font-sans ${isSidebar ? 'p-2' : 'p-4 sm:p-8'}`}>
       
+      {/* ✅ TARGETED OFFICE.JS INJECTION */}
+      {/* We only load this on the Presenter Dashboard, protecting the Login page from crashes. */}
+      <Script 
+        src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" 
+        strategy="lazyOnload" 
+      />
+
       {!isSidebar && <ReactionOverlay />}
 
       {/* --- DEBUGGER TOGGLE --- */}
@@ -342,6 +349,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                 FR
                 </div>
             )}
+            {/* Tailwind v4 Update: bg-linear-to-r */}
             <h1 className="hidden sm:block text-2xl font-bold bg-clip-text text-transparent bg-linear-to-r from-white to-slate-400">
                 FlexiRush Presenter
             </h1>
@@ -360,7 +368,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       )}
 
       {/* --- MAIN GRID --- */}
-      {/* ADAPTIVE GRID: Stack on mobile (grid-cols-1), Split on Desktop (grid-cols-3) */}
       <main className={`grid gap-6 relative z-10 flex-1 overflow-hidden h-full ${isSidebar ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-3'}`}>
         
         {/* --- LEFT PANEL (LIVE VIEW) --- */}
@@ -407,6 +414,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: LOBBY */}
                     {quiz.state === "LOBBY" && (
                         <div className="space-y-8 mt-12">
+                            {/* Tailwind v4 Update: bg-linear-to-r */}
                             <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-blue-400 to-purple-600">
                                 Get Ready!
                             </h1>
@@ -438,6 +446,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
                                         <div 
                                             key={quiz.current_index} 
+                                            // Tailwind v4 Update: bg-linear-to-r
                                             className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
                                             /* webhint: ignore inline-styles */
                                             style={{ 
@@ -508,6 +517,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: END */}
                     {quiz.state === "END" && (
                         <div className="space-y-8 animate-in zoom-in duration-500 pt-12">
+                            {/* Tailwind v4 Update: bg-linear-to-r */}
                             <h1 className="text-6xl font-black text-transparent bg-clip-text bg-linear-to-r from-yellow-400 to-orange-500 drop-shadow-sm">
                                 GAME OVER
                             </h1>
@@ -592,6 +602,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         {currentPoll.type === "rating" && (
                         <div className="flex flex-col items-center justify-center py-12">
                             <div className="relative">
+                                {/* Tailwind v4 Update: bg-linear-to-br */}
                                 <div className="text-8xl font-black text-transparent bg-clip-text bg-linear-to-br from-yellow-300 to-yellow-600 flex items-baseline gap-2">
                                     {currentPoll.average || 0.0} 
                                 </div>
@@ -743,6 +754,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                   </button>
                   <button
                     onClick={() => setShowAIModal(true)}
+                    // Tailwind v4 Update: bg-linear-to-br
                     className="p-3 bg-linear-to-br from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold rounded-lg transition flex flex-col items-center justify-center gap-1 shadow-lg active:scale-[0.98]"
                   >
                     <span className="text-xl">✨</span>
@@ -794,6 +806,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
               <button 
                 onClick={handleAiAnalyze} 
                 disabled={analyzing} 
+                // Tailwind v4 Update: bg-linear-to-r
                 className="w-full p-4 bg-linear-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl transition text-left border border-indigo-400/30 flex justify-between items-center shadow-lg active:scale-[0.98]"
               >
                 <div className="flex flex-col">
