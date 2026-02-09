@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -21,24 +21,77 @@ import re
 load_dotenv()
 
 # --- GLOBAL SETTINGS ---
-# ✅ FIX: Switched back to the standard alias which works with your API Key
-ACTIVE_MODEL = "gemini-1.5-flash"
+# We will auto-detect the best model on startup
+ACTIVE_MODEL = "gemini-1.5-flash" 
 client = None
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    global client
-    # Look for either key name to be safe
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    global client, ACTIVE_MODEL
     
+    # 1. Initialize Client
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        print("❌ CRITICAL ERROR: AI API Key is missing! Please set GEMINI_API_KEY in Render.")
-    else:
+        print("❌ CRITICAL ERROR: AI API Key is missing! Set GEMINI_API_KEY in Render.")
+        yield
+        return
+
+    try:
+        client = genai.Client(api_key=api_key)
+        print("✅ AI Client Initialized")
+
+        # 2. AUTO-DISCOVERY: Find a working model
+        # We prefer Flash -> Pro -> 1.0 Pro
+        preferred_order = [
+            "gemini-2.0-flash-exp",
+            "gemini-1.5-flash", 
+            "gemini-1.5-flash-001",
+            "gemini-1.5-pro",
+            "gemini-1.0-pro",
+            "gemini-pro"
+        ]
+        
+        found_model = None
+        
+        # Try to list models to see what is available
         try:
-            client = genai.Client(api_key=api_key)
-            print(f"✅ AI Provider initialized: {ACTIVE_MODEL}")
+            print("🔍 Scanning available AI models...")
+            # Pager object - iterate to list
+            available_models = []
+            for m in client.models.list(config={"page_size": 50}):
+                 # strip 'models/' prefix if present
+                 name = m.name.replace("models/", "")
+                 available_models.append(name)
+            
+            print(f"📋 Found Models: {', '.join(available_models[:5])}...")
+
+            # Pick the first preferred one that exists
+            for pref in preferred_order:
+                if pref in available_models:
+                    found_model = pref
+                    break
+            
+            # Fallback: Just pick the first 'generateContent' supported model
+            if not found_model:
+                for m in available_models:
+                    if "gemini" in m:
+                        found_model = m
+                        break
+        
         except Exception as e:
-            print(f"⚠️ AI Init Failed: {e}")
+            print(f"⚠️ Model scanning failed ({e}). Defaulting to fallback.")
+        
+        # Set the Global Model
+        if found_model:
+            ACTIVE_MODEL = found_model
+            print(f"🚀 LOCKED ON MODEL: {ACTIVE_MODEL}")
+        else:
+            ACTIVE_MODEL = "gemini-1.5-flash" # Hard fallback
+            print(f"⚠️ Could not verify model list. Forcing default: {ACTIVE_MODEL}")
+
+    except Exception as e:
+        print(f"⚠️ AI Init Failed: {e}")
+
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -133,7 +186,6 @@ async def get_session_data(code: str):
 async def save_session_data(code: str, data: dict):
     await redis_client.set(f"session:{code}", json.dumps(data), ex=86400)
 
-# Surgical JSON Extractor (Robust against AI chatter)
 def extract_json(text: str) -> str:
     """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
     try:
@@ -350,7 +402,7 @@ async def summarize(req: SummarizeRequest):
 @app.post("/api/ai/generate-quiz")
 async def gen_quiz(req: AIRequest):
     if not client: 
-        print("❌ AI Generation Failed: Client is None. Check GOOGLE_API_KEY.")
+        print("❌ AI Generation Failed: Client is None. Check GEMINI_API_KEY.")
         return {"questions": []}
     
     # Very strict prompt
@@ -369,7 +421,6 @@ async def gen_quiz(req: AIRequest):
                 )
             )
             
-            # Extract JSON from mixed text
             raw_text = extract_json(res.text)
             data = json.loads(raw_text)
             
