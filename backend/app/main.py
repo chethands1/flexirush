@@ -21,13 +21,14 @@ import re
 load_dotenv()
 
 # --- GLOBAL SETTINGS ---
-ACTIVE_MODEL = "gemini-1.5-flash"
+# ✅ FIX: Use the specific stable version to prevent 404 errors
+ACTIVE_MODEL = "gemini-1.5-flash-001"
 client = None
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     global client
-    # ✅ FIX: Look for GEMINI_API_KEY (your setup) OR GOOGLE_API_KEY (standard)
+    # Look for either key name to be safe
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     
     if not api_key:
@@ -132,7 +133,7 @@ async def get_session_data(code: str):
 async def save_session_data(code: str, data: dict):
     await redis_client.set(f"session:{code}", json.dumps(data), ex=86400)
 
-# ✅ FIX 3: Surgical JSON Extractor (Robust against AI chatter)
+# Surgical JSON Extractor (Robust against AI chatter)
 def extract_json(text: str) -> str:
     """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
     try:
@@ -140,7 +141,7 @@ def extract_json(text: str) -> str:
         end = text.rfind('}')
         if start != -1 and end != -1:
             return text[start:end+1]
-        return text # Return original if braces not found (fallback)
+        return text 
     except:
         return text
 
@@ -331,7 +332,7 @@ async def export_results(code: str):
         headers={"Content-Disposition": f"attachment; filename=flexirush_{code}.csv"}
     )
 
-# --- AI ROUTES (FIXED & LOGGED) ---
+# --- AI ROUTES (FIXED) ---
 
 @app.post("/api/ai/summarize")
 async def summarize(req: SummarizeRequest):
@@ -368,7 +369,7 @@ async def gen_quiz(req: AIRequest):
                 )
             )
             
-            # ✅ FIX: Extract JSON from mixed text
+            # Extract JSON from mixed text
             raw_text = extract_json(res.text)
             data = json.loads(raw_text)
             
