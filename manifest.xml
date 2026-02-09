@@ -16,7 +16,7 @@
   </Hosts>
   
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://YOUR_VERCEL_DOMAIN/presenter/demo?sidebar=true" />
+    <SourceLocation DefaultValue="https://flexirush.vercel.app/login?sidebar=true" />
   </DefaultSettings>
   
   <Permissions>ReadWriteDocument</Permissions>
