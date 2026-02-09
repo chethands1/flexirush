@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react"; 
+// ✅ Removed unused 'useEffect'
+// ✅ Removed unused 'useRouter' (we use window.location for PPT compat)
 import { useSessionStore } from "@/store/sessionStore";
 import Link from "next/link";
 
@@ -12,7 +13,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
   const { setToken, setUser } = useSessionStore();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -35,7 +35,12 @@ export default function LoginPage() {
 
       setToken(data.access_token);
       setUser(data.user);
-      router.push("/");
+
+      // ✅ FIX: Force hard navigation to clear PowerPoint history stack
+      const isSidebar = window.location.search.includes("sidebar=true");
+      const queryParam = isSidebar ? "?sidebar=true" : "";
+      
+      window.location.href = `/api/session/create${queryParam}`; 
       
     } catch (err: unknown) {
       if (err instanceof Error) {
