@@ -21,8 +21,8 @@ import re
 load_dotenv()
 
 # --- GLOBAL SETTINGS ---
-# ✅ FIX: Use the specific stable version to prevent 404 errors
-ACTIVE_MODEL = "gemini-1.5-flash-001"
+# ✅ FIX: Switched back to the standard alias which works with your API Key
+ACTIVE_MODEL = "gemini-1.5-flash"
 client = None
 
 @contextlib.asynccontextmanager
@@ -332,7 +332,7 @@ async def export_results(code: str):
         headers={"Content-Disposition": f"attachment; filename=flexirush_{code}.csv"}
     )
 
-# --- AI ROUTES (FIXED) ---
+# --- AI ROUTES ---
 
 @app.post("/api/ai/summarize")
 async def summarize(req: SummarizeRequest):
@@ -360,7 +360,7 @@ async def gen_quiz(req: AIRequest):
 
     for attempt in range(3):
         try:
-            print(f"🧠 AI Attempt {attempt+1} for: {req.prompt}")
+            print(f"🧠 AI Attempt {attempt+1} using {ACTIVE_MODEL} for: {req.prompt}")
             res = client.models.generate_content(
                 model=ACTIVE_MODEL,
                 contents=prompt,
