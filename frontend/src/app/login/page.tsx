@@ -1,8 +1,6 @@
 "use client";
 
-import { useState } from "react"; 
-// ✅ Removed unused 'useEffect'
-// ✅ Removed unused 'useRouter' (we use window.location for PPT compat)
+import { useState } from "react";
 import { useSessionStore } from "@/store/sessionStore";
 import Link from "next/link";
 
@@ -21,26 +19,50 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/token`, {
+      // 1. LOGIN REQUEST
+      const loginRes = await fetch(`${API_URL}/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await res.json();
+      const loginData = await loginRes.json();
 
-      if (!res.ok) {
-        throw new Error(data.detail || "Login failed");
+      if (!loginRes.ok) {
+        throw new Error(loginData.detail || "Login failed");
       }
 
-      setToken(data.access_token);
-      setUser(data.user);
+      // Save Auth Data
+      setToken(loginData.access_token);
+      setUser(loginData.user);
 
-      // ✅ FIX: Force hard navigation to clear PowerPoint history stack
+      // 2. AUTO-CREATE SESSION (The Fix)
+      // Instead of navigating to /api/..., we fetch it here
+      const sessionRes = await fetch(`${API_URL}/api/session`, {
+        method: "POST",
+        headers: { 
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${loginData.access_token}`
+        },
+        body: JSON.stringify({ title: "Untitled Session" }) 
+      });
+
+      if (!sessionRes.ok) {
+          // Fallback: If auto-create fails, just go to home
+          console.error("Failed to auto-create session");
+          window.location.href = "/";
+          return;
+      }
+
+      const sessionData = await sessionRes.json();
+      
+      // 3. REDIRECT TO DASHBOARD
+      // Check if we are in sidebar mode to keep the UI correct
       const isSidebar = window.location.search.includes("sidebar=true");
       const queryParam = isSidebar ? "?sidebar=true" : "";
       
-      window.location.href = `/api/session/create${queryParam}`; 
+      // Use the code from the backend to construct the URL
+      window.location.href = `/presenter/${sessionData.code}${queryParam}`; 
       
     } catch (err: unknown) {
       if (err instanceof Error) {

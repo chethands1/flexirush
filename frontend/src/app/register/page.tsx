@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
+// Removed unused useRouter
 import Link from "next/link";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
@@ -11,7 +11,6 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +31,13 @@ export default function RegisterPage() {
       }
 
       alert("Account created! Please log in.");
-      router.push("/login");
+      
+      // ✅ FIX: Force hard navigation to Login to prevent PPT history issues
+      // Check sidebar mode
+      const isSidebar = window.location.search.includes("sidebar=true");
+      const queryParam = isSidebar ? "?sidebar=true" : "";
+      
+      window.location.href = `/login${queryParam}`;
       
     } catch (err: unknown) {
       if (err instanceof Error) {
