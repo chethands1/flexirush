@@ -30,9 +30,11 @@ async def lifespan(app: FastAPI):
     global client, ACTIVE_MODEL
     
     # 1. Initialize Client
+    # Check for either variable name for flexibility
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    
     if not api_key:
-        print("❌ CRITICAL ERROR: AI API Key is missing! Set GEMINI_API_KEY in Render.")
+        print("❌ CRITICAL ERROR: AI API Key is missing! Set GEMINI_API_KEY or GOOGLE_API_KEY in Render.")
         yield
         return
 
@@ -58,6 +60,7 @@ async def lifespan(app: FastAPI):
             print("🔍 Scanning available AI models...")
             # Pager object - iterate to list
             available_models = []
+            # 'config' parameter is illustrative; actual listing depends on library version
             for m in client.models.list(config={"page_size": 50}):
                  # strip 'models/' prefix if present
                  name = m.name.replace("models/", "")
@@ -364,19 +367,23 @@ async def export_results(code: str):
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["FlexiRush Session Report", code])
+    writer.writerow(["Date", data.get("created_at", "")])
     writer.writerow([])
-    writer.writerow(["Type", "Question/Content", "Value", "Count/Score"])
+    writer.writerow(["--- QUIZ SCORES ---"])
+    writer.writerow(["Rank", "User", "Score"])
     
+    # Sort scores
+    scores = data.get('quiz_scores', {})
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    for i, (user, score) in enumerate(sorted_scores):
+        writer.writerow([i+1, user, score])
+        
+    writer.writerow([])
+    writer.writerow(["--- POLL DATA ---"])
     if data.get('poll_results'):
         for k, v in data['poll_results'].items():
-            writer.writerow(["Poll", "Live Vote", k, v])
+            writer.writerow(["Poll Option", k, "Votes", v])
             
-    for q in data.get('questions', []):
-        writer.writerow(["Q&A", q['text'], "-", q['votes']])
-        
-    for user, score in data.get('quiz_scores', {}).items():
-        writer.writerow(["Quiz Score", "User", user, score])
-        
     output.seek(0)
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode()), 
@@ -402,7 +409,7 @@ async def summarize(req: SummarizeRequest):
 @app.post("/api/ai/generate-quiz")
 async def gen_quiz(req: AIRequest):
     if not client: 
-        print("❌ AI Generation Failed: Client is None. Check GEMINI_API_KEY.")
+        print("❌ AI Generation Failed: Client is None. Check API Key.")
         return {"questions": []}
     
     # Very strict prompt
@@ -421,6 +428,7 @@ async def gen_quiz(req: AIRequest):
                 )
             )
             
+            # Extract JSON from mixed text
             raw_text = extract_json(res.text)
             data = json.loads(raw_text)
             
@@ -444,16 +452,21 @@ async def brand(code: str, req: BrandingRequest):
     await manager.broadcast(code, {"type": "BRANDING_UPDATE", "payload": data['branding']})
     return {"status": "ok"}
 
-# --- QUIZ ENDPOINTS ---
+# --- QUIZ ENDPOINTS (ENHANCED FOR AUTO-NEXT) ---
 
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
-    if not quiz.questions or len(quiz.questions) == 0:
-        raise HTTPException(status_code=400, detail="Cannot start quiz: No questions generated.")
-    
     data = await get_session_data(code)
-    data['quiz'] = {"title": quiz.title, "questions": quiz.questions, "current_index": 0, "state": "LOBBY"}
+    # Reset quiz state
+    data['quiz'] = {
+        "title": quiz.title, 
+        "questions": quiz.questions, 
+        "current_index": 0, 
+        "state": "LOBBY",
+        "answers_count": 0  # ✅ TRACKING: Reset answer count
+    }
     data['quiz_scores'] = {}
+    data['answered_users'] = [] # ✅ TRACKING: Track unique answerers
     await save_session_data(code, data)
     await manager.broadcast(code, {"type": "QUIZ_UPDATE", "quiz": data['quiz'], "scores": {}})
     return {"status": "ok"}
@@ -464,12 +477,19 @@ async def quiz_next(code: str):
     quiz = data.get('quiz')
     if not quiz: return
     
-    if quiz['state'] == 'LOBBY': quiz['state'] = 'QUESTION'
-    elif quiz['state'] == 'QUESTION': quiz['state'] = 'LEADERBOARD'
+    # State Machine Logic
+    if quiz['state'] == 'LOBBY': 
+        quiz['state'] = 'QUESTION'
+        quiz['answers_count'] = 0
+        data['answered_users'] = [] # Reset for Q1
+    elif quiz['state'] == 'QUESTION': 
+        quiz['state'] = 'LEADERBOARD'
     elif quiz['state'] == 'LEADERBOARD':
         if quiz['current_index'] + 1 < len(quiz['questions']):
             quiz['current_index'] += 1
             quiz['state'] = 'QUESTION'
+            quiz['answers_count'] = 0
+            data['answered_users'] = [] # Reset for next Q
         else:
             quiz['state'] = 'END'
             
@@ -491,11 +511,25 @@ async def quiz_ans(code: str, ans: QuizAnswer):
     data = await get_session_data(code)
     quiz = data.get('quiz')
     if quiz and quiz['state'] == 'QUESTION':
+        # ✅ TRACKING: Prevent double counting
+        answered_list = data.get('answered_users', [])
+        if ans.user_name in answered_list:
+            return {"status": "already_answered"}
+        
+        answered_list.append(ans.user_name)
+        data['answered_users'] = answered_list
+        quiz['answers_count'] = len(answered_list) # Update count for frontend
+
+        # Score Logic
         q = quiz['questions'][quiz['current_index']]
         correct_idx = q.get('correct_index', 0)
         if ans.option_index == correct_idx:
             data['quiz_scores'][ans.user_name] = data['quiz_scores'].get(ans.user_name, 0) + 100
-            await save_session_data(code, data)
+        
+        await save_session_data(code, data)
+        # Broadcast updated count so Presenter knows when to "Auto Next"
+        await manager.broadcast(code, {"type": "QUIZ_UPDATE", "quiz": quiz, "scores": data['quiz_scores']})
+        
     return {"status": "ok"}
 
 @app.post("/api/session/{code}/quiz/generate")
