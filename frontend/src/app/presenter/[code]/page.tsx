@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Image from "next/image";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-// ✅ FIX: Added 'Question' to imports to fix TypeScript error
 import { useSessionStore, Question } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
 
@@ -20,8 +19,6 @@ const TransientThoughts = dynamic(() => import("@/components/TransientThoughts")
 // --- CONFIGURATION ---
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 
-// ✅ FIX: Removed unused 'PollOption' interface
-
 export default function PresenterDashboard({ params }: { params: Promise<{ code: string }> }) {
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
   const searchParams = useSearchParams();
@@ -30,6 +27,9 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
   // Debug State
   const [showDebug, setShowDebug] = useState(false);
   const lastActionTime = useRef<number>(0);
+
+  // --- NEW: Timer State ---
+  const [timeLeft, setTimeLeft] = useState(0);
 
   useEffect(() => {
     params.then(setResolvedParams);
@@ -97,22 +97,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   // --- SYNC ENGINE ---
   const syncState = useCallback(async () => {
-      // Don't sync if we just clicked a button (prevents jumpiness)
       if (Date.now() - lastActionTime.current < 2000) return;
-
       const data = await apiCall("/state");
       if (data) {
-        // Explicitly handle null to clear state if server says so
         setQuiz(data.quiz || null);
         setPoll(data.current_poll || null);
         setQuestions(data.questions || []);
       }
   }, [apiCall, setQuiz, setPoll, setQuestions]);
 
-  // Initial Sync
   useEffect(() => { if(code) syncState(); }, [code, syncState]);
 
-  // Heartbeat (Keep alive)
   useEffect(() => {
       if (!code) return;
       const interval = setInterval(syncState, 2500); 
@@ -121,7 +116,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
 
   // --- ROBUST ACTION HANDLERS ---
-  
   const handleOptimisticUpdate = useCallback((updateFn: () => void) => {
       lastActionTime.current = Date.now(); 
       updateFn(); 
@@ -145,6 +139,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       await apiCall("/poll/end", "POST");
   }), [handleAction, handleOptimisticUpdate, setPoll, apiCall]);
   
+  // --- CORE GAME LOOP LOGIC ---
+
   const handleNextQuizStep = useCallback(() => handleAction(async () => {
       if (!quiz) return;
       
@@ -174,18 +170,58 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       handleOptimisticUpdate(() => setQuiz(null)); 
       await apiCall("/quiz/reset", "POST");
   }), [handleAction, handleOptimisticUpdate, setQuiz, apiCall]);
-  
+
+  const handleExport = () => window.open(`${API_URL}/api/session/${code}/export`, '_blank');
+
+  // --- 🧠 AUTOMATION BRAIN (Timer & Auto-Next) ---
+
+  // 1. Timer Countdown
+  useEffect(() => {
+    if (quiz?.state === "QUESTION") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const duration = (quiz.questions[quiz.current_index] as any).time_limit || 30;
+        setTimeLeft(duration);
+
+        const timer = setInterval(() => {
+            setTimeLeft((prev) => {
+                if (prev <= 1) {
+                    clearInterval(timer);
+                    handleNextQuizStep(); // Time's up -> Next
+                    return 0;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+        return () => clearInterval(timer);
+    }
+  }, [quiz?.state, quiz?.current_index, quiz?.questions, handleNextQuizStep]);
+
+  // 2. Auto-Advance when Everyone Answers
+  useEffect(() => {
+    if (quiz?.state === "QUESTION" && participants.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const answersCount = (quiz as any).answers_count || 0;
+        
+        if (answersCount >= participants.length) {
+            // Small delay for UX so they see the last vote register
+            const timeout = setTimeout(() => {
+                handleNextQuizStep();
+            }, 1500);
+            return () => clearTimeout(timeout);
+        }
+    }
+  }, [quiz, participants.length, handleNextQuizStep]);
+
+
   // --- 🛡️ AUTO-KILL SWITCH ---
-  // If the AI creates a bad quiz (0 questions), this deletes it instantly
   useEffect(() => {
       if (quiz && (!quiz.questions || quiz.questions.length === 0)) {
-          console.error("⚠️ EMPTY QUIZ DETECTED. AUTO-RESETTING TO SAVE DASHBOARD.");
+          console.error("⚠️ EMPTY QUIZ DETECTED. AUTO-RESETTING.");
           handleCloseQuiz();
       }
   }, [quiz, handleCloseQuiz]);
 
   const handleToggleQuestion = (qId: string) => apiCall(`/question/${qId}/toggle`, "POST");
-  const handleExport = () => window.location.href = `${API_URL}/api/session/${code}/export`;
   
   const handleBanUser = async (userName: string) => {
     if (!confirm(`Are you sure you want to ban ${userName}?`)) return;
@@ -236,7 +272,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
   const totalPollVotes = useMemo(() => {
     if (!pollResults) return 0;
-    // Calculate total votes dynamically from the live results object
     return Object.values(pollResults).reduce((acc, curr) => acc + (curr as number), 0);
   }, [pollResults]);
 
@@ -251,7 +286,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       );
   }
 
-  // --- SAFE DATA ACCESS ---
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rawQ: any = (quiz && quiz.questions && quiz.questions.length > 0 && quiz.questions[quiz.current_index]) 
     ? quiz.questions[quiz.current_index] 
@@ -274,11 +308,10 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
             onClick={() => setShowDebug(!showDebug)}
             className="bg-red-600/20 hover:bg-red-600 text-red-200 hover:text-white text-xs px-3 py-1 rounded shadow-lg border border-red-500/50 transition backdrop-blur-md"
           >
-            {showDebug ? "Hide Debug" : "🐞 Debug Data"}
+            {showDebug ? "Hide Debug" : "🐞"}
           </button>
       </div>
 
-      {/* --- DEBUG OVERLAY --- */}
       {showDebug && (
           <div className="fixed inset-0 bg-black/90 z-50 p-8 overflow-auto font-mono text-xs text-green-400 animate-in fade-in">
               <div className="max-w-4xl mx-auto">
@@ -286,20 +319,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                       <h2 className="text-xl text-white font-bold">🔍 Live Data Inspector</h2>
                       <button onClick={() => setShowDebug(false)} className="bg-red-600 text-white px-4 py-2 rounded font-bold hover:bg-red-500">CLOSE</button>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
-                          <h3 className="text-yellow-400 font-bold mb-4 text-sm uppercase tracking-wider">Current Quiz State</h3>
-                          {/* ✅ FIX: Updated Tailwind class to wrap-break-word */}
-                          <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(quiz, null, 2)}</pre>
-                      </div>
-                      <div className="space-y-6">
-                          <div className="bg-gray-900 p-6 rounded-xl border border-gray-700">
-                              <h3 className="text-blue-400 font-bold mb-4 text-sm uppercase tracking-wider">Raw Question Data</h3>
-                              {/* ✅ FIX: Updated Tailwind class to wrap-break-word */}
-                              <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(rawQ || "NULL (No Data Found)", null, 2)}</pre>
-                          </div>
-                      </div>
-                  </div>
+                  <pre className="whitespace-pre-wrap wrap-break-word">{JSON.stringify(quiz, null, 2)}</pre>
               </div>
           </div>
       )}
@@ -321,7 +341,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                 FR
                 </div>
             )}
-            {/* ✅ FIX: Updated Tailwind class to bg-linear-to-r */}
             <h1 className="hidden sm:block text-2xl font-bold bg-clip-text text-transparent bg-linear-to-r from-white to-slate-400">
                 FlexiRush Presenter
             </h1>
@@ -347,11 +366,27 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
             <div className="lg:col-span-2 bg-slate-900/50 backdrop-blur-sm p-4 sm:p-8 rounded-2xl border border-slate-800 flex flex-col shadow-2xl relative overflow-y-auto custom-scrollbar min-h-[60vh]">
             
             {quiz ? (
-                <div className="flex flex-col h-full items-center justify-center text-center w-full animate-in fade-in zoom-in duration-300">
+                <div className="flex flex-col h-full items-center justify-center text-center w-full animate-in fade-in zoom-in duration-300 relative">
                     
                     {/* QUIZ HEADER */}
-                    <div className="flex justify-between items-center w-full mb-4 absolute top-4 px-6 z-20">
-                        <h2 className="text-sm uppercase tracking-widest text-slate-400 font-bold max-w-[50%] truncate">{quiz.title}</h2>
+                    <div className="flex justify-between items-center w-full mb-4 absolute top-0 px-2 pt-2 z-20">
+                        <div className="flex items-center gap-4">
+                             <span className="bg-slate-800 text-xs px-2 py-1 rounded text-slate-400 font-bold uppercase tracking-wider">
+                                {quiz.state === 'LOBBY' ? 'Lobby' : quiz.state === 'END' ? 'Finished' : `Q${quiz.current_index + 1}`}
+                             </span>
+                             {/* TIMER & ANSWER COUNT */}
+                             {quiz.state === 'QUESTION' && (
+                                <div className="flex gap-2">
+                                    <span className={`text-sm font-mono font-bold px-2 py-1 rounded ${timeLeft < 5 ? "bg-red-500/20 text-red-400 animate-pulse" : "bg-slate-800 text-white"}`}>
+                                        ⏰ {timeLeft}s
+                                    </span>
+                                    <span className="text-sm font-mono font-bold px-2 py-1 rounded bg-blue-900/30 text-blue-400 border border-blue-500/30">
+                                        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                                        📥 {(quiz as any).answers_count || 0}/{participants.length}
+                                    </span>
+                                </div>
+                             )}
+                        </div>
                         <div className="flex gap-2">
                             {quiz.state !== "END" && (
                                 <button onClick={handleNextQuizStep} disabled={actionLoading} className="px-3 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-bold transition border border-slate-700">
@@ -359,10 +394,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </button>
                             )}
                             <button 
-                                onClick={() => {
-                                    if(confirm("Are you sure you want to quit the quiz? Progress will be lost.")) handleCloseQuiz();
-                                }}
-                                disabled={actionLoading}
+                                onClick={() => { if(confirm("Quit quiz?")) handleCloseQuiz(); }}
                                 className="px-3 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-200 border border-red-500/30 rounded text-xs font-bold transition"
                             >
                                 ✕ Quit
@@ -372,8 +404,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     
                     {/* STATE: LOBBY */}
                     {quiz.state === "LOBBY" && (
-                        <div className="space-y-8">
-                            {/* ✅ FIX: Updated Tailwind class to bg-linear-to-r */}
+                        <div className="space-y-8 mt-12">
                             <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-blue-400 to-purple-600">
                                 Get Ready!
                             </h1>
@@ -394,17 +425,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
 
                     {/* STATE: QUESTION (LIVE) */}
                     {quiz.state === "QUESTION" && (
-                        <div className="w-full max-w-4xl pt-12">
+                        <div className="w-full max-w-4xl pt-16">
                             {currentQ ? (
                                 <>
                                 <div className="mb-8">
                                     <h3 className="text-3xl sm:text-4xl font-bold leading-tight mb-8 animate-in slide-in-from-right-4 fade-in">
                                         {currentQ.text}
                                     </h3>
+                                    {/* PROGRESS BAR */}
                                     <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden relative">
                                         <div 
                                             key={quiz.current_index} 
-                                            // ✅ FIX: Updated Tailwind class to bg-linear-to-r
                                             className="h-full bg-linear-to-r from-green-500 to-yellow-500 origin-left" 
                                             /* webhint: ignore inline-styles */
                                             style={{ 
@@ -425,7 +456,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                             }`}
                                         >
                                             <span className="text-2xl opacity-60 bg-black/20 w-10 h-10 flex items-center justify-center rounded-lg">
-                                                {['▲', '◆', '●', '■'][i]}
+                                                {['A', 'B', 'C', 'D'][i]}
                                             </span>
                                             <span className="text-left">
                                                 {typeof opt === 'string' ? opt : opt.label}
@@ -435,21 +466,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </div>
                                 </>
                             ) : (
-                                <div className="flex flex-col items-center justify-center text-slate-500 gap-4 py-10">
-                                    <div className="bg-red-900/20 border border-red-500/50 p-6 rounded-xl max-w-md text-center animate-in zoom-in">
-                                        <p className="text-4xl mb-4">⚠️</p>
-                                        <h3 className="text-xl font-bold text-red-400 mb-2">AI Quiz Generation Failed</h3>
-                                        <p className="text-sm text-slate-300 mb-4">
-                                            The system is auto-repairing. This screen should close in a moment...
-                                        </p>
-                                        <button 
-                                            onClick={handleCloseQuiz} 
-                                            className="w-full bg-slate-700 hover:bg-slate-600 text-white px-4 py-3 rounded-lg font-bold transition"
-                                        >
-                                            Force Close Now
-                                        </button>
-                                    </div>
-                                </div>
+                                <p>Loading...</p>
                             )}
                         </div>
                     )}
@@ -475,9 +492,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                             <span className="font-mono font-bold text-blue-400">{score as number} pts</span>
                                     </div>
                                 ))}
-                                {Object.keys(quizScores || {}).length === 0 && (
-                                    <p className="text-slate-500 italic">Waiting for scores...</p>
-                                )}
                             </div>
                             <button 
                                 onClick={handleNextQuizStep} 
@@ -492,7 +506,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {/* STATE: END */}
                     {quiz.state === "END" && (
                         <div className="space-y-8 animate-in zoom-in duration-500 pt-12">
-                            {/* ✅ FIX: Updated Tailwind class to bg-linear-to-r */}
                             <h1 className="text-6xl font-black text-transparent bg-clip-text bg-linear-to-r from-yellow-400 to-orange-500 drop-shadow-sm">
                                 GAME OVER
                             </h1>
@@ -505,9 +518,18 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     {Object.entries(quizScores || {}).sort(([,a], [,b]) => (b as number) - (a as number))[0]?.[1] || 0} pts
                                 </p>
                             </div>
-                            <button onClick={handleCloseQuiz} disabled={actionLoading} className="px-6 py-3 bg-slate-700 hover:bg-slate-600 rounded-lg transition font-medium text-slate-200">
-                                Close Quiz & Return to Lobby
-                            </button>
+                            
+                            <div className="flex justify-center gap-4">
+                                <button 
+                                    onClick={handleExport}
+                                    className="px-6 py-3 bg-green-600 hover:bg-green-500 rounded-lg transition font-bold text-white shadow-lg flex items-center gap-2"
+                                >
+                                    📥 Download Results
+                                </button>
+                                <button onClick={handleCloseQuiz} disabled={actionLoading} className="px-6 py-3 bg-slate-700 hover:bg-slate-600 rounded-lg transition font-medium text-slate-200">
+                                    Close Quiz
+                                </button>
+                            </div>
                         </div>
                     )}
                 </div>
@@ -539,10 +561,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                         {currentPoll.type === "multiple_choice" && (
                         <div className="space-y-4 max-w-2xl mx-auto w-full">
                             {currentPoll.options?.map((opt: { label: string; votes: number }, idx: number) => {
-                            // DYNAMIC SYNC: pollResults now comes live via socket/api
                             const count = pollResults?.[opt.label] ?? 0;
                             const percent = totalPollVotes > 0 ? (count / totalPollVotes) * 100 : 0;
-                            
                             return (
                                 <div key={idx} className="relative group">
                                     <div className="flex justify-between text-base font-medium mb-1 px-1">
@@ -564,14 +584,12 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                 </div>
                             );
                             })}
-                            <p className="text-center text-slate-500 text-sm mt-4">{totalPollVotes} total votes</p>
                         </div>
                         )}
 
                         {currentPoll.type === "rating" && (
                         <div className="flex flex-col items-center justify-center py-12">
                             <div className="relative">
-                                {/* ✅ FIX: Updated Tailwind class to bg-linear-to-br */}
                                 <div className="text-8xl font-black text-transparent bg-clip-text bg-linear-to-br from-yellow-300 to-yellow-600 flex items-baseline gap-2">
                                     {currentPoll.average || 0.0} 
                                 </div>
@@ -581,22 +599,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                                     <span key={star} className={`text-4xl ${star <= Math.round(currentPoll.average || 0) ? 'text-yellow-400' : 'text-slate-700'}`}>★</span>
                                 ))}
                             </div>
-                            <p className="text-slate-500 mt-4">{totalPollVotes} votes</p>
                         </div>
                         )}
 
                         {currentPoll.type === "word_cloud" && (
                             <div className="flex flex-wrap gap-4 justify-center items-center py-8 min-h-75">
                             {(() => {
-                                // Prefer live results, fallback to initial words
                                 const wordsToShow = (pollResults && Object.keys(pollResults).length > 0) 
                                     ? pollResults 
                                     : (currentPoll.words || {});
-                                
                                 const entries = Object.entries(wordsToShow);
-
                                 if (entries.length === 0) return <span className="text-slate-500">Waiting for words...</span>;
-
                                 return entries.map(([word, count]) => (
                                     <span 
                                         key={word} 
@@ -627,7 +640,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     {questions.length === 0 && (
                         <div className="text-center py-10 text-slate-500">
                             <p>No questions yet.</p>
-                            <p className="text-sm">Audience can ask questions from their devices.</p>
                         </div>
                     )}
                     {questions.sort((a, b) => b.votes - a.votes).map((q: Question) => (
@@ -647,14 +659,11 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                             <div className={`text-base font-medium ${q.visible !== false ? "text-slate-200" : "text-slate-500 italic line-through"}`}>
                                 {q.text}
                             </div>
-                            {q.visible === false && <span className="text-[10px] text-red-400 uppercase font-bold tracking-wider mt-1 block">Hidden</span>}
                         </div>
                         <button 
                             onClick={() => handleToggleQuestion(q.id)}
                             className={`px-3 py-1 rounded text-sm font-bold transition h-fit self-center ${
-                                q.visible !== false 
-                                ? "bg-slate-700 text-slate-300 hover:bg-slate-600"
-                                : "bg-blue-900/30 text-blue-400 hover:bg-blue-900/50"
+                                q.visible !== false ? "bg-slate-700 text-slate-300" : "bg-blue-900/30 text-blue-400"
                             }`}
                         >
                             {q.visible !== false ? "Hide" : "Show"}
@@ -697,13 +706,17 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
           <div className="bg-slate-900/80 p-5 rounded-xl border border-slate-800 shadow-xl backdrop-blur-md">
             <h2 className="text-base font-bold text-slate-300 mb-4 uppercase tracking-wider">Control Deck</h2>
             
-            {/* QUIZ CONTROLS - ALWAYS VISIBLE IF QUIZ ACTIVE */}
+            {/* QUIZ CONTROLS */}
             {quiz && (
                 <div className="mb-4 p-4 bg-blue-900/20 border border-blue-500/50 rounded-lg animate-pulse">
-                    <p className="text-xs text-blue-300 font-bold uppercase mb-2">Active Quiz: {quiz.state}</p>
+                    <div className="flex justify-between items-center mb-2">
+                        <p className="text-xs text-blue-300 font-bold uppercase">Quiz: {quiz.state}</p>
+                        {quiz.state === "QUESTION" && (
+                            <span className="text-xs text-white font-mono">{timeLeft}s</span>
+                        )}
+                    </div>
                     <div className="flex flex-col gap-2">
                         {quiz.state === 'LOBBY' && <button onClick={handleNextQuizStep} className="p-3 bg-green-600 hover:bg-green-500 rounded font-bold transition">Start Game ▶</button>}
-                        {quiz.state === 'QUESTION' && <div className="text-center text-sm font-bold text-white bg-slate-800 p-2 rounded">Question Live...</div>}
                         {quiz.state === 'LEADERBOARD' && <button onClick={handleNextQuizStep} className="p-3 bg-blue-600 hover:bg-blue-500 rounded font-bold transition">Next Question ➡</button>}
                         <button onClick={handleCloseQuiz} className="p-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded text-xs border border-red-500/20 transition">End Quiz</button>
                     </div>
@@ -728,7 +741,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                   </button>
                   <button
                     onClick={() => setShowAIModal(true)}
-                    // ✅ FIX: Updated Tailwind class to bg-linear-to-br
                     className="p-3 bg-linear-to-br from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white font-bold rounded-lg transition flex flex-col items-center justify-center gap-1 shadow-lg active:scale-[0.98]"
                   >
                     <span className="text-xl">✨</span>
@@ -742,66 +754,13 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
               >
                 <span>Spin Wheel</span><span>🎲</span>
               </button>
-              
-              {/* STREAMALIVE-STYLE CHAT PARSER */}
-              <div className="bg-slate-800/50 p-3 rounded-lg border border-slate-700 mt-2">
-                  <label htmlFor="chat-input" className="text-xs text-slate-400 font-bold uppercase block mb-2">Paste Chat Log (Zoom/Teams)</label>
-                  <textarea 
-                      id="chat-input"
-                      className="w-full bg-slate-900 text-xs text-white p-2 rounded h-16 border border-slate-700 mb-2 focus:ring-1 focus:ring-blue-500 outline-none"
-                      placeholder="Paste chat here..."
-                  ></textarea>
-                  <button 
-                      onClick={async () => {
-                          const text = (document.getElementById('chat-input') as HTMLTextAreaElement).value;
-                          if (!text) return;
-                          
-                          // 1. Reset current state first (Visual feedback)
-                          setPoll(null); 
-                          
-                          // 2. Simple NLP: Filter out short words, count frequency
-                          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                          const words = text.split(/\s+/).filter(w => w.length > 3).reduce((acc: any, word) => {
-                              const clean = word.toLowerCase().replace(/[^a-z]/g, '');
-                              if (clean.length > 3) {
-                                  acc[clean] = (acc[clean] || 0) + 1;
-                              }
-                              return acc;
-                          }, {});
-
-                          // 3. Send to backend
-                          await apiCall("/poll/start", "POST", { 
-                              type: "word_cloud", 
-                              question: "Chat Insights", 
-                              words: words 
-                          });
-
-                          // 4. Force a fetch to ensure UI syncs if socket is slow
-                          setTimeout(() => {
-                              apiCall("/state").then((data) => {
-                                  if (data?.current_poll) setPoll(data.current_poll);
-                              });
-                          }, 300);
-                      }}
-                      className="w-full bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold py-2 rounded transition"
-                  >
-                      ✨ Visualize Chat
-                  </button>
-              </div>
 
               {!isSidebar && (
                   <>
-                    <button 
-                        onClick={() => setShowMap(true)} 
-                        className="p-3 bg-purple-900/30 hover:bg-purple-900/50 text-purple-200 border border-purple-500/30 rounded-lg transition text-left flex justify-between items-center text-sm"
-                    >
+                    <button onClick={() => setShowMap(true)} className="p-3 bg-purple-900/30 hover:bg-purple-900/50 text-purple-200 border border-purple-500/30 rounded-lg transition text-left flex justify-between items-center text-sm">
                         <span>Magic Map</span><span>🌍</span>
                     </button>
-                    
-                    <button 
-                        onClick={handleExport} 
-                        className="p-3 bg-orange-900/20 hover:bg-orange-900/40 text-orange-200 border border-orange-500/20 rounded-lg transition text-left flex justify-between items-center text-sm"
-                    >
+                    <button onClick={handleExport} className="p-3 bg-orange-900/20 hover:bg-orange-900/40 text-orange-200 border border-orange-500/20 rounded-lg transition text-left flex justify-between items-center text-sm">
                         <span>Export CSV</span><span>📥</span>
                     </button>
                   </>
@@ -828,12 +787,11 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
             </div>
           </div>
           
-          {/* AI INSIGHTS BUTTON & CARD */}
+          {/* AI INSIGHTS BUTTON */}
           <div className="space-y-3">
               <button 
                 onClick={handleAiAnalyze} 
                 disabled={analyzing} 
-                // ✅ FIX: Updated Tailwind class to bg-linear-to-r
                 className="w-full p-4 bg-linear-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl transition text-left border border-indigo-400/30 flex justify-between items-center shadow-lg active:scale-[0.98]"
               >
                 <div className="flex flex-col">
@@ -859,11 +817,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       </main>
 
       {/* --- MODALS --- */}
-      
-      {showWheel && (
-         <WinningWheel participants={participants.map(p => p.name) || []} onClose={() => setShowWheel(false)} />
-      )}
-
+      {showWheel && <WinningWheel participants={participants.map(p => p.name) || []} onClose={() => setShowWheel(false)} />}
       {showPollForm && <CreatePollForm sessionCode={code} onClose={() => setShowPollForm(false)} />}
       {showQuizCreator && <QuizCreator sessionCode={code} onClose={() => setShowQuizCreator(false)} />}
       {showAIModal && <AIQuizCreator sessionCode={code} onClose={() => setShowAIModal(false)} onSuccess={handleQuizCreated} />}
@@ -894,8 +848,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
           <div className="bg-slate-900 border border-slate-700 p-6 rounded-2xl w-full max-w-md shadow-2xl scale-100">
             <h2 className="text-xl font-bold mb-6 flex items-center gap-2">⚙️ Session Settings</h2>
             <div className="space-y-6">
-              
-              {/* BRANDING SECTION */}
               <div>
                 <label htmlFor="logo-url" className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-2 block">Custom Logo URL</label>
                 <input 
@@ -908,13 +860,8 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     className="w-full bg-slate-800 border border-slate-700 p-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm placeholder:text-slate-600" 
                 />
               </div>
-
-              {/* EMBED SECTION (NEW) */}
               <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
                 <label className="text-xs font-bold text-blue-400 uppercase tracking-widest mb-2 block">Embed in Slides / Notion</label>
-                <p className="text-[10px] text-slate-400 mb-3">
-                    Copy this URL into an iframe or the &quot;Web Viewer&quot; add-in for PowerPoint.
-                </p>
                 <div className="flex gap-2">
                     <input 
                         readOnly 
@@ -934,7 +881,6 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
                     </button>
                 </div>
               </div>
-
               <div className="flex gap-3 pt-2">
                 <button onClick={() => setShowSettings(false)} className="flex-1 py-3 text-slate-400 hover:bg-slate-800 rounded-lg transition font-bold border border-transparent hover:border-slate-700">Close</button>
                 <button onClick={saveSettings} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg transition shadow-lg">Save Branding</button>
