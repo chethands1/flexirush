@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp 
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" 
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" 
+  xsi:type="TaskPaneApp">
+  
+  <Id>c3942a04-5678-4321-abcd-987654321000</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>FlexiRush</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="FlexiRush Presenter" />
+  <Description DefaultValue="Real-time interactive quizzes inside PowerPoint." />
+  
+  <Hosts>
+    <Host Name="Presentation" />
+  </Hosts>
+  
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://YOUR_VERCEL_DOMAIN/presenter/demo?sidebar=true" />
+  </DefaultSettings>
+  
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>
