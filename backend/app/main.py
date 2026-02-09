@@ -21,7 +21,6 @@ import re
 load_dotenv()
 
 # --- GLOBAL SETTINGS ---
-# We will auto-detect the best model on startup
 ACTIVE_MODEL = "gemini-1.5-flash" 
 client = None
 
@@ -30,11 +29,9 @@ async def lifespan(app: FastAPI):
     global client, ACTIVE_MODEL
     
     # 1. Initialize Client
-    # Check for either variable name for flexibility
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    
     if not api_key:
-        print("❌ CRITICAL ERROR: AI API Key is missing! Set GEMINI_API_KEY or GOOGLE_API_KEY in Render.")
+        print("❌ CRITICAL ERROR: AI API Key is missing!")
         yield
         return
 
@@ -42,55 +39,35 @@ async def lifespan(app: FastAPI):
         client = genai.Client(api_key=api_key)
         print("✅ AI Client Initialized")
 
-        # 2. AUTO-DISCOVERY: Find a working model
-        # We prefer Flash -> Pro -> 1.0 Pro
-        preferred_order = [
-            "gemini-2.0-flash-exp",
-            "gemini-1.5-flash", 
-            "gemini-1.5-flash-001",
-            "gemini-1.5-pro",
-            "gemini-1.0-pro",
-            "gemini-pro"
-        ]
-        
+        # 2. AUTO-DISCOVERY
+        preferred_order = ["gemini-2.0-flash-exp", "gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro", "gemini-1.0-pro"]
         found_model = None
         
-        # Try to list models to see what is available
         try:
             print("🔍 Scanning available AI models...")
-            # Pager object - iterate to list
             available_models = []
-            # 'config' parameter is illustrative; actual listing depends on library version
             for m in client.models.list(config={"page_size": 50}):
-                 # strip 'models/' prefix if present
                  name = m.name.replace("models/", "")
                  available_models.append(name)
             
-            print(f"📋 Found Models: {', '.join(available_models[:5])}...")
-
-            # Pick the first preferred one that exists
             for pref in preferred_order:
                 if pref in available_models:
                     found_model = pref
                     break
             
-            # Fallback: Just pick the first 'generateContent' supported model
             if not found_model:
                 for m in available_models:
                     if "gemini" in m:
                         found_model = m
                         break
+        except:
+            pass
         
-        except Exception as e:
-            print(f"⚠️ Model scanning failed ({e}). Defaulting to fallback.")
-        
-        # Set the Global Model
         if found_model:
             ACTIVE_MODEL = found_model
             print(f"🚀 LOCKED ON MODEL: {ACTIVE_MODEL}")
         else:
-            ACTIVE_MODEL = "gemini-1.5-flash" # Hard fallback
-            print(f"⚠️ Could not verify model list. Forcing default: {ACTIVE_MODEL}")
+            ACTIVE_MODEL = "gemini-1.5-flash"
 
     except Exception as e:
         print(f"⚠️ AI Init Failed: {e}")
@@ -99,7 +76,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -190,7 +166,6 @@ async def save_session_data(code: str, data: dict):
     await redis_client.set(f"session:{code}", json.dumps(data), ex=86400)
 
 def extract_json(text: str) -> str:
-    """Finds the first '{' and last '}' to isolate JSON from AI chatter."""
     try:
         start = text.find('{')
         end = text.rfind('}')
@@ -237,7 +212,8 @@ async def create_session():
         "poll_results": {},
         "quiz": None,
         "quiz_scores": {},
-        "branding": {"theme_color": "#3b82f6", "logo_url": ""}
+        "branding": {"theme_color": "#3b82f6", "logo_url": ""},
+        "activity_log": [] # ✅ NEW: HISTORY LOG
     }
     await save_session_data(code, initial_data)
     return {"code": code}
@@ -267,13 +243,10 @@ async def join_session(code: str, user: JoinSession):
 async def start_poll(code: str, poll: Poll):
     data = await get_session_data(code)
     if not data: return
-    
     data['current_poll'] = poll.dict()
     data['poll_results'] = {} 
-    
     if poll.type == 'multiple_choice':
         for opt in poll.options: data['poll_results'][opt['label']] = 0
-        
     await save_session_data(code, data)
     await manager.broadcast(code, {
         "type": "POLL_START", 
@@ -286,6 +259,17 @@ async def start_poll(code: str, poll: Poll):
 async def end_poll(code: str):
     data = await get_session_data(code)
     if not data: return
+    
+    # ✅ HISTORY: Save Poll to Log before clearing
+    if data['current_poll']:
+        if 'activity_log' not in data: data['activity_log'] = []
+        data['activity_log'].append({
+            "type": "poll",
+            "timestamp": str(datetime.datetime.now()),
+            "details": data['current_poll'],
+            "results": data['poll_results']
+        })
+
     data['current_poll'] = None
     await save_session_data(code, data)
     await manager.broadcast(code, {"type": "POLL_UPDATE", "payload": None, "results": {}})
@@ -306,19 +290,15 @@ async def vote(code: str, req: VoteRequest):
             data['poll_results'][val_str] += 1
         else:
             data['poll_results'][val_str] = 1
-
     elif poll_type == 'rating':
         val_str = str(value)
         data['poll_results'][val_str] = data['poll_results'].get(val_str, 0) + 1
         total_score = sum(int(k)*v for k,v in data['poll_results'].items())
         total_votes = sum(data['poll_results'].values())
         poll['average'] = round(total_score / total_votes, 1) if total_votes > 0 else 0
-
     elif poll_type == 'word_cloud':
         val = str(value).strip().lower()
-        if val: 
-            data['poll_results'][val] = data['poll_results'].get(val, 0) + 1
-            
+        if val: data['poll_results'][val] = data['poll_results'].get(val, 0) + 1
     elif poll_type == 'open_ended':
         val = str(value).strip()
         if 'responses' not in poll: poll['responses'] = []
@@ -360,39 +340,89 @@ async def ban(code: str, req: BanRequest):
     await manager.broadcast(code, {"type": "PARTICIPANT_UPDATE", "participants": data['participants']})
     return {"status": "banned"}
 
+# --- EXPORT ROUTE (UPDATED) ---
 @app.get("/api/session/{code}/export")
 async def export_results(code: str):
     data = await get_session_data(code)
     if not data: raise HTTPException(status_code=404)
+    
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["FlexiRush Session Report", code])
-    writer.writerow(["Date", data.get("created_at", "")])
-    writer.writerow([])
-    writer.writerow(["--- QUIZ SCORES ---"])
-    writer.writerow(["Rank", "User", "Score"])
     
-    # Sort scores
-    scores = data.get('quiz_scores', {})
-    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    for i, (user, score) in enumerate(sorted_scores):
-        writer.writerow([i+1, user, score])
-        
+    # 1. HEADER
+    writer.writerow(["FLEXIRUSH SESSION REPORT"])
+    writer.writerow(["Session Code", code])
+    writer.writerow(["Created At", data.get("created_at", "")])
+    writer.writerow(["Total Participants", len(data.get("participants", []))])
     writer.writerow([])
-    writer.writerow(["--- POLL DATA ---"])
-    if data.get('poll_results'):
-        for k, v in data['poll_results'].items():
-            writer.writerow(["Poll Option", k, "Votes", v])
+
+    # 2. PARTICIPANTS
+    writer.writerow(["--- PARTICIPANT LIST ---"])
+    writer.writerow(["Name", "Join ID"])
+    for p in data.get("participants", []):
+        writer.writerow([p['name'], p['id']])
+    writer.writerow([])
+
+    # 3. ACTIVITY LOG (POLLS & QUIZZES)
+    writer.writerow(["--- DETAILED ACTIVITY LOG ---"])
+    writer.writerow(["Timestamp", "Type", "Question/Title", "Detail/User", "Count/Score"])
+    
+    # Process Logs
+    logs = data.get("activity_log", [])
+    
+    # Include ACTIVE item if exists
+    if data.get("current_poll"):
+        logs.append({"type": "poll", "details": data["current_poll"], "results": data["poll_results"], "timestamp": "ACTIVE NOW"})
+    if data.get("quiz"):
+        logs.append({"type": "quiz", "details": data["quiz"], "results": data["quiz_scores"], "timestamp": "ACTIVE NOW"})
+
+    for item in logs:
+        ts = item.get("timestamp", "")
+        kind = item.get("type", "").upper()
+        
+        if kind == "POLL":
+            details = item.get("details", {})
+            results = item.get("results", {})
+            question = details.get("question", "Unknown Question")
+            writer.writerow([ts, "POLL", question, "-", "-"])
             
+            if details.get("type") == "multiple_choice":
+                for opt, count in results.items():
+                    writer.writerow(["", "", "Option", opt, count])
+            elif details.get("type") == "open_ended":
+                for resp in details.get("responses", []):
+                    writer.writerow(["", "", "Response", resp, "-"])
+            elif details.get("type") == "rating":
+                writer.writerow(["", "", "Average Rating", details.get("average", 0), "-"])
+                
+        elif kind == "QUIZ":
+            details = item.get("details", {})
+            scores = item.get("results", {})
+            title = details.get("title", "Unknown Quiz")
+            writer.writerow([ts, "QUIZ", title, "-", "-"])
+            
+            # Sort scores
+            sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+            for i, (user, score) in enumerate(sorted_scores):
+                writer.writerow(["", "", f"Rank {i+1}", user, score])
+        
+        writer.writerow([]) # Spacer
+
+    # 4. Q&A LOG
+    writer.writerow(["--- Q&A LOG ---"])
+    writer.writerow(["Question Text", "Upvotes", "Status"])
+    for q in data.get('questions', []):
+        status = "Visible" if q.get('visible', True) else "Hidden"
+        writer.writerow([q['text'], q['votes'], status])
+
     output.seek(0)
     return StreamingResponse(
         io.BytesIO(output.getvalue().encode()), 
         media_type="text/csv", 
-        headers={"Content-Disposition": f"attachment; filename=flexirush_{code}.csv"}
+        headers={"Content-Disposition": f"attachment; filename=FlexiRush_Report_{code}.csv"}
     )
 
 # --- AI ROUTES ---
-
 @app.post("/api/ai/summarize")
 async def summarize(req: SummarizeRequest):
     if not client: return {"summary": "AI Config Missing"}
@@ -403,45 +433,24 @@ async def summarize(req: SummarizeRequest):
         )
         return {"summary": response.text}
     except Exception as e:
-        print(f"❌ Summarize Failed: {e}")
         return {"summary": "AI is unavailable right now."}
 
 @app.post("/api/ai/generate-quiz")
 async def gen_quiz(req: AIRequest):
-    if not client: 
-        print("❌ AI Generation Failed: Client is None. Check API Key.")
-        return {"questions": []}
+    if not client: return {"questions": []}
     
-    # Very strict prompt
     prompt = f"""Generate a 5-question trivia quiz about "{req.prompt}".
     Return raw JSON only. NO Markdown. NO backticks.
     Format: {{ "title": "Quiz Title", "questions": [ {{ "text": "Q?", "options": ["A","B","C","D"], "correct_index": 0, "time_limit": 30 }} ] }}"""
 
     for attempt in range(3):
         try:
-            print(f"🧠 AI Attempt {attempt+1} using {ACTIVE_MODEL} for: {req.prompt}")
-            res = client.models.generate_content(
-                model=ACTIVE_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                )
-            )
-            
-            # Extract JSON from mixed text
+            res = client.models.generate_content(model=ACTIVE_MODEL, contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
             raw_text = extract_json(res.text)
             data = json.loads(raw_text)
-            
-            if "questions" in data and len(data["questions"]) > 0:
-                print(f"✅ AI Success!")
-                return data
-            else:
-                print(f"⚠️ AI returned empty questions: {raw_text}")
-                
-        except Exception as e:
-            print(f"❌ AI Attempt {attempt+1} Failed: {e}")
+            if "questions" in data and len(data["questions"]) > 0: return data
+        except Exception:
             await asyncio.sleep(1)
-
     return {"title": "Error", "questions": []}
 
 @app.post("/api/session/{code}/branding")
@@ -452,21 +461,30 @@ async def brand(code: str, req: BrandingRequest):
     await manager.broadcast(code, {"type": "BRANDING_UPDATE", "payload": data['branding']})
     return {"status": "ok"}
 
-# --- QUIZ ENDPOINTS (ENHANCED FOR AUTO-NEXT) ---
+# --- QUIZ ENDPOINTS (UPDATED FOR LOGGING) ---
 
 @app.post("/api/session/{code}/quiz/start")
 async def quiz_start(code: str, quiz: QuizStart):
     data = await get_session_data(code)
-    # Reset quiz state
+    # If a quiz is already active, log it before overwriting
+    if data.get('quiz'):
+        if 'activity_log' not in data: data['activity_log'] = []
+        data['activity_log'].append({
+            "type": "quiz",
+            "timestamp": str(datetime.datetime.now()),
+            "details": data['quiz'],
+            "results": data['quiz_scores']
+        })
+
     data['quiz'] = {
         "title": quiz.title, 
         "questions": quiz.questions, 
         "current_index": 0, 
         "state": "LOBBY",
-        "answers_count": 0  # ✅ TRACKING: Reset answer count
+        "answers_count": 0
     }
     data['quiz_scores'] = {}
-    data['answered_users'] = [] # ✅ TRACKING: Track unique answerers
+    data['answered_users'] = []
     await save_session_data(code, data)
     await manager.broadcast(code, {"type": "QUIZ_UPDATE", "quiz": data['quiz'], "scores": {}})
     return {"status": "ok"}
@@ -477,11 +495,10 @@ async def quiz_next(code: str):
     quiz = data.get('quiz')
     if not quiz: return
     
-    # State Machine Logic
     if quiz['state'] == 'LOBBY': 
         quiz['state'] = 'QUESTION'
         quiz['answers_count'] = 0
-        data['answered_users'] = [] # Reset for Q1
+        data['answered_users'] = []
     elif quiz['state'] == 'QUESTION': 
         quiz['state'] = 'LEADERBOARD'
     elif quiz['state'] == 'LEADERBOARD':
@@ -489,7 +506,7 @@ async def quiz_next(code: str):
             quiz['current_index'] += 1
             quiz['state'] = 'QUESTION'
             quiz['answers_count'] = 0
-            data['answered_users'] = [] # Reset for next Q
+            data['answered_users'] = []
         else:
             quiz['state'] = 'END'
             
@@ -500,6 +517,17 @@ async def quiz_next(code: str):
 @app.post("/api/session/{code}/quiz/reset")
 async def quiz_reset(code: str):
     data = await get_session_data(code)
+    
+    # ✅ HISTORY: Save Quiz to Log before clearing
+    if data.get('quiz'):
+        if 'activity_log' not in data: data['activity_log'] = []
+        data['activity_log'].append({
+            "type": "quiz",
+            "timestamp": str(datetime.datetime.now()),
+            "details": data['quiz'],
+            "results": data['quiz_scores']
+        })
+
     data['quiz'] = None
     data['quiz_scores'] = {} 
     await save_session_data(code, data)
@@ -511,23 +539,20 @@ async def quiz_ans(code: str, ans: QuizAnswer):
     data = await get_session_data(code)
     quiz = data.get('quiz')
     if quiz and quiz['state'] == 'QUESTION':
-        # ✅ TRACKING: Prevent double counting
         answered_list = data.get('answered_users', [])
         if ans.user_name in answered_list:
             return {"status": "already_answered"}
         
         answered_list.append(ans.user_name)
         data['answered_users'] = answered_list
-        quiz['answers_count'] = len(answered_list) # Update count for frontend
+        quiz['answers_count'] = len(answered_list)
 
-        # Score Logic
         q = quiz['questions'][quiz['current_index']]
         correct_idx = q.get('correct_index', 0)
         if ans.option_index == correct_idx:
             data['quiz_scores'][ans.user_name] = data['quiz_scores'].get(ans.user_name, 0) + 100
         
         await save_session_data(code, data)
-        # Broadcast updated count so Presenter knows when to "Auto Next"
         await manager.broadcast(code, {"type": "QUIZ_UPDATE", "quiz": quiz, "scores": data['quiz_scores']})
         
     return {"status": "ok"}
