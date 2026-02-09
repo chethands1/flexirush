@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Image from "next/image";
 import { useSessionStore } from "@/store/sessionStore"; 
 import { useRealtime } from "@/hooks/useRealtime";
@@ -25,26 +25,64 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   const [questionText, setQuestionText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Sync Ref to prevent over-fetching
+  const lastSyncTime = useRef<number>(0);
+
   useEffect(() => {
     params.then(setResolvedParams);
   }, [params]);
 
   const code = resolvedParams?.code || "";
   
-  // 1. Connect to Realtime
+  // 1. Connect to Realtime (WebSocket)
   useRealtime(code, "participant");
 
   const { 
     user,
     isConnected,
     currentPoll,
-    questions, // Q&A List from Store
+    questions, 
     quiz,
     quizScores,
     branding,
     setUser,
-    setToken
+    setToken,
+    setQuiz,        
+    setPoll,
+    setQuestions // ✅ FIX: We will use this now
   } = useSessionStore();
+
+  // --- 2. FALLBACK HEARTBEAT (FIX FOR MOBILE STUCK STATE) ---
+  const syncState = useCallback(async () => {
+      // Don't sync if we just performed an action (prevents jitters)
+      if (Date.now() - lastSyncTime.current < 2000) return;
+      
+      try {
+          const res = await fetch(`${API_URL}/api/session/${code}/state`);
+          if (res.ok) {
+              const data = await res.json();
+              
+              // ✅ FIX: Sync ALL state components including Questions
+              if (data.quiz) setQuiz(data.quiz);
+              if (data.current_poll) setPoll(data.current_poll);
+              if (data.questions) setQuestions(data.questions);
+
+              // Handle nulls (server cleared state)
+              if (data.quiz === null && quiz !== null) setQuiz(null);
+              if (data.current_poll === null && currentPoll !== null) setPoll(null);
+          }
+      } catch (e) {
+          console.error("Heartbeat failed", e);
+      }
+  }, [code, setQuiz, setPoll, setQuestions, quiz, currentPoll]);
+
+  // Run heartbeat every 3 seconds to catch missed socket events
+  useEffect(() => {
+      if (!code || !user) return;
+      const interval = setInterval(syncState, 3000);
+      return () => clearInterval(interval);
+  }, [code, user, syncState]);
+
 
   // --- PERSISTENCE: CHECK LOCALSTORAGE ---
   useEffect(() => {
@@ -53,7 +91,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       if (currentPoll) {
           activityKey = `poll_${code}_${currentPoll.question}`;
       } else if (quiz) {
-          // Quiz key includes Title to allow resetting quiz with same questions
+          // Key includes index so it changes every question
           activityKey = `quiz_${code}_${quiz.title}_${quiz.current_index}`;
       }
 
@@ -64,6 +102,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
               const savedOption = localStorage.getItem(activityKey + "_opt");
               if (savedOption) setSelectedOption(Number(savedOption));
           } else {
+              // Reset state for new question
               setHasVoted(false);
               setSelectedOption(null);
               setPollAnswer("");
@@ -71,11 +110,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       } else {
           setHasVoted(false);
       }
-  }, [currentPoll, quiz, code]); 
+  }, [currentPoll, quiz, code]); // ✅ FIX: Full dependencies to satisfy linter
 
   // --- HELPER: MARK AS VOTED ---
   const markAsVoted = (optionIndex?: number) => {
       let activityKey = null;
+      lastSyncTime.current = Date.now(); // Pause heartbeat briefly
 
       if (currentPoll) {
           activityKey = `poll_${code}_${currentPoll.question}`;
@@ -159,11 +199,8 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   const handleAskQuestion = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!questionText.trim()) return;
-      
       const success = await apiCall("/question", { text: questionText });
-      if (success) {
-          setQuestionText("");
-      }
+      if (success) setQuestionText("");
   };
 
   // --- 🛡️ SAFETY SHIELD ---
@@ -219,7 +256,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   return (
     <div className="min-h-dvh bg-slate-950 text-white font-sans flex flex-col pb-28"> {/* pb-28: Extra padding for bottom fixed nav */}
       
-      {/* HEADER - Sticky & Glassmorphic */}
+      {/* HEADER */}
       <header className="px-4 py-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/80 backdrop-blur-md sticky top-0 z-20">
           <div className="flex items-center gap-2">
              {branding?.logo_url ? <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded" /> : <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-xs">FR</div>}
@@ -234,7 +271,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       {/* MAIN CONTENT AREA */}
       <main className="flex-1 flex flex-col p-4 max-w-md mx-auto w-full relative">
             
-            {/* === TAB 1: LIVE ACTIVITY === */}
             {activeTab === 'activity' && (
                 <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
                     {/* SCENARIO 1: QUIZ */}
@@ -254,13 +290,13 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                                 </div>
                             )}
 
+                            {/* ✅ FORCE RE-RENDER: The 'key' ensures React rebuilds this block when index changes */}
                             {quiz.state === "QUESTION" && (
                                 safeQuizQuestion ? (
-                                    <div className="space-y-8">
+                                    <div key={quiz.current_index} className="space-y-8 animate-in fade-in">
                                         <h2 className="text-2xl sm:text-3xl font-bold text-center leading-snug">{safeQuizQuestion.text}</h2>
                                         <div className="h-3 bg-slate-800 rounded-full overflow-hidden w-full shadow-inner">
                                             <div 
-                                                key={quiz.current_index} 
                                                 className="h-full bg-linear-to-r from-purple-500 to-pink-500 origin-left" 
                                                 /* webhint: ignore inline-styles */ 
                                                 style={{ animation: `width_linear ${safeQuizQuestion.time_limit}s linear forwards`, width: '100%' }}
@@ -308,7 +344,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
                     {/* SCENARIO 2: POLL */}
                     {!quiz && currentPoll && (
-                        <div className="w-full space-y-8 animate-in fade-in zoom-in duration-300">
+                        <div key={currentPoll.question} className="w-full space-y-8 animate-in fade-in zoom-in duration-300">
                             <div className="text-center mb-4">
                                 <span className="bg-blue-900/30 text-blue-300 text-xs font-bold px-4 py-1.5 rounded-full border border-blue-500/30 uppercase tracking-widest">Live Poll</span>
                             </div>
