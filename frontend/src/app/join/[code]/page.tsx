@@ -53,6 +53,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       if (currentPoll) {
           activityKey = `poll_${code}_${currentPoll.question}`;
       } else if (quiz) {
+          // Quiz key includes Title to allow resetting quiz with same questions
           activityKey = `quiz_${code}_${quiz.title}_${quiz.current_index}`;
       }
 
@@ -162,7 +163,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       const success = await apiCall("/question", { text: questionText });
       if (success) {
           setQuestionText("");
-          // Optional: Add a toast notification here
       }
   };
 
@@ -179,15 +179,15 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       };
   }, [quiz]);
 
-  if (!resolvedParams) return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">Loading...</div>;
+  if (!resolvedParams) return <div className="min-h-dvh bg-slate-950 flex items-center justify-center text-white">Loading...</div>;
 
   // --- VIEW: GUEST JOIN FORM ---
   if (!user) {
       return (
-          <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white">
+          <div className="min-h-dvh bg-slate-950 flex flex-col items-center justify-center p-6 text-white">
               <div className="w-full max-w-sm bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl animate-in zoom-in duration-300">
                   <div className="text-center mb-8">
-                      <div className="w-16 h-16 bg-blue-600 rounded-xl mx-auto flex items-center justify-center text-2xl font-bold mb-4 shadow-lg shadow-blue-900/50">FR</div>
+                      <div className="w-16 h-16 bg-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-4 shadow-lg shadow-blue-900/50">FR</div>
                       <h1 className="text-3xl font-bold mb-2">Join Session</h1>
                       <p className="text-slate-400 text-sm">Enter your name to join the activity.</p>
                   </div>
@@ -199,14 +199,14 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                               value={guestName}
                               onChange={(e) => setGuestName(e.target.value)}
                               placeholder="e.g. John Doe"
-                              className="w-full bg-slate-950 border border-slate-700 p-4 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500 transition placeholder:text-slate-600 font-medium"
+                              className="w-full bg-slate-950 border border-slate-700 p-4 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500 transition placeholder:text-slate-600 font-medium text-lg"
                               autoFocus
                           />
                       </div>
                       <button 
                           type="submit" 
                           disabled={!guestName.trim() || isJoining}
-                          className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold py-4 rounded-xl transition shadow-lg flex justify-center items-center gap-2 transform active:scale-[0.98]"
+                          className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold py-4 rounded-xl transition shadow-lg flex justify-center items-center gap-2 transform active:scale-[0.98] text-lg"
                       >
                           {isJoining ? <span className="animate-spin text-xl">◌</span> : "Join Now 🚀"}
                       </button>
@@ -217,10 +217,10 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col pb-20"> {/* pb-20 for bottom tab bar */}
+    <div className="min-h-dvh bg-slate-950 text-white font-sans flex flex-col pb-28"> {/* pb-28: Extra padding for bottom fixed nav */}
       
-      {/* HEADER */}
-      <header className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 backdrop-blur-md sticky top-0 z-20">
+      {/* HEADER - Sticky & Glassmorphic */}
+      <header className="px-4 py-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/80 backdrop-blur-md sticky top-0 z-20">
           <div className="flex items-center gap-2">
              {branding?.logo_url ? <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded" /> : <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-xs">FR</div>}
              <span className="font-bold hidden sm:block">FlexiRush</span>
@@ -231,14 +231,15 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
           </div>
       </header>
 
+      {/* MAIN CONTENT AREA */}
       <main className="flex-1 flex flex-col p-4 max-w-md mx-auto w-full relative">
             
             {/* === TAB 1: LIVE ACTIVITY === */}
             {activeTab === 'activity' && (
-                <>
+                <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
                     {/* SCENARIO 1: QUIZ */}
                     {quiz && quiz.state !== "END" && (
-                        <div className="w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
+                        <div className="w-full">
                             <div className="text-center mb-8">
                                 <span className="bg-purple-900/30 text-purple-300 text-xs font-bold px-4 py-1.5 rounded-full border border-purple-500/30 uppercase tracking-widest">
                                     {quiz.state === "LOBBY" ? "Quiz Lobby" : `Question ${quiz.current_index + 1}`}
@@ -256,7 +257,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                             {quiz.state === "QUESTION" && (
                                 safeQuizQuestion ? (
                                     <div className="space-y-8">
-                                        <h2 className="text-3xl font-bold text-center leading-snug">{safeQuizQuestion.text}</h2>
+                                        <h2 className="text-2xl sm:text-3xl font-bold text-center leading-snug">{safeQuizQuestion.text}</h2>
                                         <div className="h-3 bg-slate-800 rounded-full overflow-hidden w-full shadow-inner">
                                             <div 
                                                 key={quiz.current_index} 
@@ -272,7 +273,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                                                     key={i} 
                                                     disabled={hasVoted || isSubmitting} 
                                                     onClick={() => handleQuizAnswer(i)} 
-                                                    className={`p-5 rounded-2xl text-lg font-bold transition-all transform active:scale-95 flex items-center gap-4 text-left border-2 shadow-lg
+                                                    className={`p-5 rounded-2xl text-lg font-bold transition-all transform active:scale-[0.98] flex items-center gap-4 text-left border-2 shadow-lg
                                                         ${hasVoted 
                                                             ? (selectedOption === i 
                                                                 ? "bg-purple-600 border-purple-500 text-white shadow-purple-900/50" 
@@ -321,7 +322,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                                             key={i} 
                                             onClick={() => handlePollVote(opt.label)} 
                                             disabled={hasVoted} 
-                                            className={`p-5 rounded-2xl font-bold text-left transition-all shadow-lg active:scale-95 ${hasVoted ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700" : "bg-blue-600 hover:bg-blue-500 text-white"}`}
+                                            className={`p-5 rounded-2xl font-bold text-left transition-all shadow-lg active:scale-[0.98] ${hasVoted ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700" : "bg-blue-600 hover:bg-blue-500 text-white"}`}
                                         >
                                             {opt.label}
                                         </button>
@@ -341,7 +342,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                                     <button 
                                         onClick={() => handlePollVote(pollAnswer)} 
                                         disabled={!pollAnswer.trim() || hasVoted} 
-                                        className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg active:scale-95"
+                                        className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg active:scale-[0.98]"
                                     >
                                         {hasVoted ? "Sent! ✅" : "Submit Answer"}
                                     </button>
@@ -373,12 +374,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                             <p className="text-sm">Sit back and relax! The session will resume shortly.</p>
                         </div>
                     )}
-                </>
+                </div>
             )}
 
             {/* === TAB 2: Q&A === */}
             {activeTab === 'qna' && (
-                <div className="w-full h-full flex flex-col">
+                <div className="w-full h-full flex flex-col animate-in fade-in slide-in-from-right-2 duration-300">
                     <div className="mb-6">
                         <h2 className="text-2xl font-bold text-white mb-2">Ask a Question</h2>
                         <p className="text-slate-400 text-sm">Send your questions to the presenter.</p>
@@ -389,12 +390,12 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                             value={questionText}
                             onChange={(e) => setQuestionText(e.target.value)}
                             placeholder="Type your question..."
-                            className="w-full bg-slate-800 border border-slate-700 p-4 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none resize-none h-32 mb-4"
+                            className="w-full bg-slate-800 border border-slate-700 p-4 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none resize-none h-32 mb-4 text-base"
                         />
                         <button 
                             type="submit" 
                             disabled={!questionText.trim() || isSubmitting}
-                            className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg"
+                            className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg active:scale-[0.98]"
                         >
                             {isSubmitting ? "Sending..." : "Submit Question"}
                         </button>
@@ -408,7 +409,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                             <div className="space-y-3">
                                 {questions.map((q) => (
                                     <div key={q.id} className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
-                                        <p className="text-slate-200">{q.text}</p>
+                                        <p className="text-slate-200 text-lg">{q.text}</p>
                                         <div className="flex items-center gap-2 mt-2">
                                             <span className="text-xs text-slate-500">▲ {q.votes} upvotes</span>
                                         </div>
@@ -423,20 +424,20 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       </main>
 
       {/* --- BOTTOM TAB BAR --- */}
-      <div className="fixed bottom-0 left-0 w-full bg-slate-900 border-t border-slate-800 p-2 z-30">
+      <div className="fixed bottom-0 left-0 w-full bg-slate-900/90 backdrop-blur-lg border-t border-slate-800 p-2 z-30 pb-safe">
           <div className="flex justify-center gap-2 max-w-md mx-auto">
               <button 
                   onClick={() => setActiveTab('activity')}
-                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex flex-col items-center gap-1 ${activeTab === 'activity' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}
+                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex flex-col items-center gap-1 active:scale-95 ${activeTab === 'activity' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}
               >
-                  <span className="text-lg">📊</span>
+                  <span className="text-xl">📊</span>
                   Activity
               </button>
               <button 
                   onClick={() => setActiveTab('qna')}
-                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex flex-col items-center gap-1 ${activeTab === 'qna' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}
+                  className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex flex-col items-center gap-1 active:scale-95 ${activeTab === 'qna' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}
               >
-                  <span className="text-lg">💬</span>
+                  <span className="text-xl">💬</span>
                   Q&A
               </button>
           </div>

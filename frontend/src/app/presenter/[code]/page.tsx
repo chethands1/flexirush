@@ -22,6 +22,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 export default function PresenterDashboard({ params }: { params: Promise<{ code: string }> }) {
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
   const searchParams = useSearchParams();
+  // SIDEBAR MODE: Essential for PowerPoint integration
   const isSidebar = searchParams.get("sidebar") === "true";
 
   // Debug State
@@ -359,6 +360,7 @@ export default function PresenterDashboard({ params }: { params: Promise<{ code:
       )}
 
       {/* --- MAIN GRID --- */}
+      {/* ADAPTIVE GRID: Stack on mobile (grid-cols-1), Split on Desktop (grid-cols-3) */}
       <main className={`grid gap-6 relative z-10 flex-1 overflow-hidden h-full ${isSidebar ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-3'}`}>
         
         {/* --- LEFT PANEL (LIVE VIEW) --- */}
