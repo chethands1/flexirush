@@ -153,6 +153,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   const [isVoting,                setIsVoting]               = useState(false);
   const [isAskingQ,               setIsAskingQ]              = useState(false);
   const [sessionEnded,            setSessionEnded]           = useState(false);
+  const [isKicked,                setIsKicked]               = useState(false); // 🛡️ NEW: Ejection State
   const [localTimeExpired,        setLocalTimeExpired]       = useState(false);
   const [isRestoringLocalState,   setIsRestoringLocalState]  = useState(false);
   const [transmissionError,       setTransmissionError]      = useState<string | null>(null);
@@ -162,6 +163,7 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   // -------------------------------------------------------------------------
   const currentVersion = useRef<number>(0);
   const isSubmittingRef = useRef<boolean>(false);
+  const hasJoinedProperly = useRef<boolean>(false); // 🛡️ NEW: Tracks if we were ever successfully in the room
   const fetchAbortController = useRef<AbortController | null>(null);
   const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [serverTimeOffset, setServerTimeOffset] = useState<number>(0);
@@ -182,10 +184,28 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   useRealtime(code, "participant");
 
   const {
-    user, isConnected,
+    user, isConnected, participants, // 🛡️ NEW: Extracted participants array
     currentPoll, pollResults, questions, quiz, quizScores, branding,
     setUser, setToken, setQuiz, setPoll, setQuestions, setPollResults
   } = useSessionStore();
+
+  // -------------------------------------------------------------------------
+  // 🛡️ EJECTION OBSERVER (Instant Ban Execution)
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (!user || !participants || participants.length === 0) return;
+    
+    // Check if the server still recognizes our ID in the live grid
+    const amIHere = participants.some((p: { id: string }) => p.id === user.id);
+    
+    if (amIHere) {
+      hasJoinedProperly.current = true;
+    } else if (hasJoinedProperly.current && !amIHere) {
+      // If we were in the room, but now we aren't, the presenter ejected us.
+      setIsKicked(true);
+    }
+  }, [participants, user]);
+
 
   const safeQuiz = quiz as SafeQuiz | null;
   
@@ -225,7 +245,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   const hasPollResults = Boolean(pollResults && Object.keys(pollResults).length > 0);
   const isPollClosed = Boolean(safePoll?.state === "CLOSED" || safePoll?.status === "CLOSED" || hasPollResults);
   
-  // 🛡️ FRONTEND FIX 1: JoinPage Score Lookup (Uses Display Name)
   const myScore = quizScores?.[user?.email ?? ""] ?? 0;
   
   const visibleQuestions = useMemo(() => questions.filter((q) => q.visible !== false), [questions]);
@@ -241,18 +260,16 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
     if (!data || typeof data !== 'object') return;
     const safeData = data as Record<string, unknown>;
 
-    // 🛡️ FRONTEND FIX 4: Clock Skew Cutoff
+    // EMA Clock Skew
     if (typeof safeData.server_now === 'number') {
       const newOffset = safeData.server_now - Date.now();
       setServerTimeOffset(prev => {
         if (prev === 0) return newOffset;
-        // Accept massive corrections (e.g., > 60s) if device wakes from sleep
         if (Math.abs(prev - newOffset) > 60000) return newOffset; 
         return Math.floor(prev * 0.8 + newOffset * 0.2);
       });
     }
 
-    // 🛡️ FRONTEND FIX 3: Relaxed Version Guard (Allows unversioned heartbeats)
     const quizRecord = safeData.quiz as { version?: number } | undefined;
     const rawVersion = safeData.version ?? quizRecord?.version;
     
@@ -267,7 +284,6 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
     if ('quiz' in safeData) setQuiz(safeData.quiz as Parameters<typeof setQuiz>[0]);
     if ('current_poll' in safeData) setPoll(safeData.current_poll as Parameters<typeof setPoll>[0]);
     if ('questions' in safeData) setQuestions(safeData.questions as Parameters<typeof setQuestions>[0]);
-    // 🛡️ FRONTEND FIX 2: Added missing poll_results sync for heartbeat
     if ('poll_results' in safeData && setPollResults) setPollResults(safeData.poll_results as Record<string, number>);
   }, [setQuiz, setPoll, setQuestions, setPollResults]);
 
@@ -287,6 +303,15 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       
       if (!res.ok) throw new Error(JSON.stringify({ status: res.status, message: await res.text() }));
       const data = await res.json();
+
+      // 🛡️ FALLBACK KICK GUARD: In case the WebSocket missed the ban message
+      if (user && data.participants) {
+        const amIHere = data.participants.some((p: { id: string }) => p.id === user.id);
+        if (hasJoinedProperly.current && !amIHere) {
+          setIsKicked(true);
+        }
+      }
+
       applyStatePayload(data);
     } catch (e: unknown) {
       if (e instanceof Error) {
@@ -297,16 +322,16 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
         } catch { /* ignore */ }
       }
     }
-  }, [code, applyStatePayload]);
+  }, [code, user, applyStatePayload]);
 
   useEffect(() => {
-    if (!code || !user || sessionEnded) return;
+    if (!code || !user || sessionEnded || isKicked) return;
     const ms = isConnected ? 30_000 : 3_000;
     const id = setInterval(() => syncState(false), ms);
     const onFocus = () => syncState(true);
     window.addEventListener("focus", onFocus);
     return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };
-  }, [code, user, isConnected, sessionEnded, syncState]);
+  }, [code, user, isConnected, sessionEnded, isKicked, syncState]);
 
   // -------------------------------------------------------------------------
   // TIMER COMPUTATION
@@ -560,6 +585,17 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
     return (
       <div className="min-h-dvh bg-slate-950 flex items-center justify-center text-white">
         <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin drop-shadow-[0_0_15px_rgba(59,130,246,0.8)]" />
+      </div>
+    );
+  }
+
+  // 🛡️ NEW EJECTION RENDER
+  if (isKicked) {
+    return (
+      <div className="min-h-dvh bg-slate-950 flex flex-col items-center justify-center p-6 text-white text-center animate-in fade-in duration-500">
+        <div className="text-6xl mb-6 grayscale opacity-80 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]">🚫</div>
+        <h1 className="text-3xl font-black mb-2 text-red-500 tracking-tight">Access Revoked</h1>
+        <p className="text-slate-400 font-medium max-w-xs">You have been ejected from the session grid by the host.</p>
       </div>
     );
   }
