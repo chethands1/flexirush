@@ -6,14 +6,10 @@ import { useSessionStore } from "@/store/sessionStore";
 import { useRealtime } from "@/hooks/useRealtime";
 
 // ---------------------------------------------------------------------------
-// CONFIG
+// CONFIG & STORAGE
 // ---------------------------------------------------------------------------
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-
-// ---------------------------------------------------------------------------
-// SAFE STORAGE — localStorage throws in iOS private browsing
-// ---------------------------------------------------------------------------
 
 const safeStorage = {
   get: (key: string): string | null => {
@@ -25,38 +21,160 @@ const safeStorage = {
 };
 
 // ---------------------------------------------------------------------------
+// STRICT SCHEMAS & TYPES
+// ---------------------------------------------------------------------------
+
+interface QuizOption {
+  label: string;
+  isCorrect?: boolean;
+}
+
+interface QuizQuestion {
+  id?: string; 
+  text?: string;
+  question?: string; 
+  time_limit?: number; 
+  options?: string[] | QuizOption[];
+  answers?: string[] | QuizOption[]; 
+}
+
+interface SafeQuiz {
+  title: string;
+  state: "LOBBY" | "QUESTION" | "LEADERBOARD" | "END";
+  current_index: number;
+  questions: QuizQuestion[];
+  answers_count?: number;
+  question_started_at?: number; 
+  version?: number;
+}
+
+type PollType = "multiple_choice" | "word_cloud" | "open_ended" | "rating";
+const VALID_POLL_TYPES = new Set(["multiple_choice", "word_cloud", "open_ended", "rating"]);
+
+interface ActivePoll {
+  id: string; 
+  question: string;
+  type: PollType;
+  state?: string;
+  status?: string;
+  options?: { label: string }[];
+  average?: number;
+  words?: Record<string, number>;
+  responses?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// CUSTOM HOOK: useServerSyncedTimer
+// ---------------------------------------------------------------------------
+
+function useServerSyncedTimer(
+  isActive: boolean,
+  startedAt: number | undefined,
+  duration: number,
+  onTimeUp: () => void,
+  isLocked: boolean,
+  timeOffset: number
+): number {
+  const [timeLeft, setTimeLeft] = useState(0);
+  const onTimeUpRef = useRef(onTimeUp);
+  const isLockedRef = useRef(isLocked);
+  const offsetRef = useRef(timeOffset);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => { onTimeUpRef.current = onTimeUp; }, [onTimeUp]);
+  useEffect(() => { isLockedRef.current = isLocked; }, [isLocked]);
+  useEffect(() => { offsetRef.current = timeOffset; }, [timeOffset]);
+
+  useEffect(() => {
+    if (!isActive || duration <= 0 || startedAt == null) {
+      const timeoutId = setTimeout(() => setTimeLeft(startedAt != null ? 0 : duration), 0);
+      return () => clearTimeout(timeoutId);
+    }
+
+    const updateTimer = () => {
+      const clientNowSynced = Date.now() + offsetRef.current;
+      const elapsed = Math.max(0, Math.floor((clientNowSynced - startedAt) / 1000));
+      const remaining = Math.max(0, duration - elapsed);
+      
+      setTimeLeft(prev => prev === remaining ? prev : remaining);
+
+      if (remaining === 0) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        if (!isLockedRef.current) {
+          onTimeUpRef.current();
+        }
+      }
+    };
+
+    updateTimer(); 
+    timerRef.current = setInterval(updateTimer, 500); 
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [isActive, startedAt, duration]);
+
+  return timeLeft;
+}
+
+// ---------------------------------------------------------------------------
 // COMPONENT
 // ---------------------------------------------------------------------------
 
 export default function JoinPage({ params }: { params: Promise<{ code: string }> }) {
-  // -------------------------------------------------------------------------
-  // ROUTE
-  // -------------------------------------------------------------------------
   const [resolvedParams, setResolvedParams] = useState<{ code: string } | null>(null);
 
-  useEffect(() => { params.then(setResolvedParams); }, [params]);
+  useEffect(() => {
+    let mounted = true;
+    params.then((p) => {
+      if (mounted) setResolvedParams(p);
+    });
+    return () => { mounted = false; };
+  }, [params]);
 
   const code = resolvedParams?.code ?? "";
 
   // -------------------------------------------------------------------------
   // UI STATE
   // -------------------------------------------------------------------------
-  const [guestName,      setGuestName]      = useState("");
-  const [isJoining,      setIsJoining]      = useState(false);
-  const [activeTab,      setActiveTab]      = useState<"activity" | "qna">("activity");
-  const [hasVoted,       setHasVoted]       = useState(false);
-  const [selectedOption, setSelectedOption] = useState<number | null>(null);
-  const [pollAnswer,     setPollAnswer]     = useState("");
-  const [questionText,   setQuestionText]   = useState("");
+  const [guestName,       setGuestName]      = useState("");
+  const [isJoining,       setIsJoining]      = useState(false);
+  const [activeTab,       setActiveTab]      = useState<"activity" | "qna">("activity");
+  
+  // Voting State
+  const [hasVoted,           setHasVoted]           = useState(false);
+  const [selectedQuizIndex,  setSelectedQuizIndex]  = useState<number | null>(null);
+  const [selectedPollValue,  setSelectedPollValue]  = useState<string | null>(null);
+  const [selectedRating,     setSelectedRating]     = useState<number | null>(null);
+  const [pollAnswer,         setPollAnswer]         = useState("");
+  const [questionText,       setQuestionText]       = useState("");
 
-  // Separate loading states per action — prevents cross-contamination
-  const [isVoting,       setIsVoting]       = useState(false);
-  const [isAskingQ,      setIsAskingQ]      = useState(false);
+  // Lifecycle States
+  const [isVoting,                setIsVoting]               = useState(false);
+  const [isAskingQ,               setIsAskingQ]              = useState(false);
+  const [sessionEnded,            setSessionEnded]           = useState(false);
+  const [localTimeExpired,        setLocalTimeExpired]       = useState(false);
+  const [isRestoringLocalState,   setIsRestoringLocalState]  = useState(false);
+  const [transmissionError,       setTransmissionError]      = useState<string | null>(null);
 
   // -------------------------------------------------------------------------
-  // SYNC REF — prevents heartbeat from clobbering optimistic updates
+  // ARCHITECTURE REFS
   // -------------------------------------------------------------------------
-  const lastSyncTime = useRef<number>(0);
+  const currentVersion = useRef<number>(0);
+  const isSubmittingRef = useRef<boolean>(false);
+  const fetchAbortController = useRef<AbortController | null>(null);
+  const errorTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [serverTimeOffset, setServerTimeOffset] = useState<number>(0);
+
+  useEffect(() => {
+    return () => fetchAbortController.current?.abort();
+  }, []);
+
+  const triggerError = useCallback((msg: string) => {
+    setTransmissionError(msg);
+    if (errorTimeoutRef.current) clearTimeout(errorTimeoutRef.current);
+    errorTimeoutRef.current = setTimeout(() => setTransmissionError(null), 3500);
+  }, []);
 
   // -------------------------------------------------------------------------
   // STORE
@@ -65,95 +183,232 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
 
   const {
     user, isConnected,
-    currentPoll, questions, quiz, quizScores, branding,
-    setUser, setToken, setQuiz, setPoll, setQuestions,
+    currentPoll, pollResults, questions, quiz, quizScores, branding,
+    setUser, setToken, setQuiz, setPoll, setQuestions, setPollResults
   } = useSessionStore();
 
-  // -------------------------------------------------------------------------
-  // HEARTBEAT
-  // Keep refs so syncState's dependency array stays stable and the interval
-  // doesn't restart every time quiz/poll state changes.
-  // -------------------------------------------------------------------------
-  const quizRef       = useRef(quiz);
-  const pollRef       = useRef(currentPoll);
-  const isConnectedRef = useRef(isConnected);
-
-  useEffect(() => { quizRef.current        = quiz;        }, [quiz]);
-  useEffect(() => { pollRef.current        = currentPoll; }, [currentPoll]);
-  useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
-
-  const syncState = useCallback(async () => {
-    if (Date.now() - lastSyncTime.current < 2000) return;
-    try {
-      const res = await fetch(`${API_URL}/api/session/${code}/state`);
-      if (!res.ok) return;
-      const data = await res.json();
-
-      // Only update fields that actually changed to avoid unnecessary re-renders
-      if (data.quiz         !== undefined) setQuiz(data.quiz ?? null);
-      if (data.current_poll !== undefined) setPoll(data.current_poll ?? null);
-      if (data.questions    !== undefined) setQuestions(data.questions ?? []);
-    } catch (e) {
-      console.error("Heartbeat failed:", e);
+  const safeQuiz = quiz as SafeQuiz | null;
+  
+  const safePoll = useMemo(() => {
+    const p = currentPoll as ActivePoll | null;
+    if (p && !VALID_POLL_TYPES.has(p.type)) {
+      console.error(`System Interface Ignored: Invalid poll type '${p.type}' received from server.`);
+      return null;
     }
-  }, [code, setQuiz, setPoll, setQuestions]);
+    return p;
+  }, [currentPoll]);
 
-  // Adaptive frequency — poll less aggressively when socket is healthy
+  // -------------------------------------------------------------------------
+  // DERIVED VALUES
+  // -------------------------------------------------------------------------
+  const safeQuizQuestion = useMemo(() => {
+    if (!safeQuiz?.questions?.length) return null;
+    const q = safeQuiz.questions[safeQuiz.current_index];
+    if (!q) return null;
+    
+    const opts = q.options ?? q.answers;
+    if (!Array.isArray(opts)) return null;
+
+    return {
+      id: q.id,
+      text: q.text ?? q.question ?? "Loading...",
+      options: opts,
+      time_limit: q.time_limit ?? 30,
+    };
+  }, [safeQuiz]);
+
+  const totalPollVotes = useMemo(() => {
+    if (!pollResults) return 0;
+    return Object.values(pollResults).reduce((acc, curr) => acc + (curr as number), 0);
+  }, [pollResults]);
+
+  const hasPollResults = Boolean(pollResults && Object.keys(pollResults).length > 0);
+  const isPollClosed = Boolean(safePoll?.state === "CLOSED" || safePoll?.status === "CLOSED" || hasPollResults);
+  
+  // 🛡️ FRONTEND FIX 1: JoinPage Score Lookup (Uses Display Name)
+  const myScore = quizScores?.[user?.email ?? ""] ?? 0;
+  
+  const visibleQuestions = useMemo(() => questions.filter((q) => q.visible !== false), [questions]);
+
   useEffect(() => {
-    if (!code || !user) return;
-    const ms = isConnected ? 10_000 : 3_000;
-    const id = setInterval(syncState, ms);
-    const onFocus = () => syncState();
+    setLocalTimeExpired(false);
+  }, [safeQuiz?.current_index]);
+
+  // -------------------------------------------------------------------------
+  // API & STATE SYNC
+  // -------------------------------------------------------------------------
+  const applyStatePayload = useCallback((data: unknown) => {
+    if (!data || typeof data !== 'object') return;
+    const safeData = data as Record<string, unknown>;
+
+    // 🛡️ FRONTEND FIX 4: Clock Skew Cutoff
+    if (typeof safeData.server_now === 'number') {
+      const newOffset = safeData.server_now - Date.now();
+      setServerTimeOffset(prev => {
+        if (prev === 0) return newOffset;
+        // Accept massive corrections (e.g., > 60s) if device wakes from sleep
+        if (Math.abs(prev - newOffset) > 60000) return newOffset; 
+        return Math.floor(prev * 0.8 + newOffset * 0.2);
+      });
+    }
+
+    // 🛡️ FRONTEND FIX 3: Relaxed Version Guard (Allows unversioned heartbeats)
+    const quizRecord = safeData.quiz as { version?: number } | undefined;
+    const rawVersion = safeData.version ?? quizRecord?.version;
+    
+    if (rawVersion != null) {
+      const incomingVersion = Number(rawVersion);
+      if (Number.isFinite(incomingVersion)) {
+        if (currentVersion.current > 0 && incomingVersion < currentVersion.current) return; 
+        if (incomingVersion > currentVersion.current) currentVersion.current = incomingVersion;
+      }
+    }
+
+    if ('quiz' in safeData) setQuiz(safeData.quiz as Parameters<typeof setQuiz>[0]);
+    if ('current_poll' in safeData) setPoll(safeData.current_poll as Parameters<typeof setPoll>[0]);
+    if ('questions' in safeData) setQuestions(safeData.questions as Parameters<typeof setQuestions>[0]);
+    // 🛡️ FRONTEND FIX 2: Added missing poll_results sync for heartbeat
+    if ('poll_results' in safeData && setPollResults) setPollResults(safeData.poll_results as Record<string, number>);
+  }, [setQuiz, setPoll, setQuestions, setPollResults]);
+
+  const syncState = useCallback(async (force = false) => {
+    if (!force && isSubmittingRef.current) return;
+    
+    if (fetchAbortController.current) {
+      fetchAbortController.current.abort();
+    }
+    fetchAbortController.current = new AbortController();
+
+    try {
+      if (!code) return;
+      const res = await fetch(`${API_URL}/api/session/${code}/state`, {
+        signal: fetchAbortController.current.signal
+      });
+      
+      if (!res.ok) throw new Error(JSON.stringify({ status: res.status, message: await res.text() }));
+      const data = await res.json();
+      applyStatePayload(data);
+    } catch (e: unknown) {
+      if (e instanceof Error) {
+        if (e.name === 'AbortError') return; 
+        try {
+          const errData = JSON.parse(e.message);
+          if (errData.status === 404) setSessionEnded(true); 
+        } catch { /* ignore */ }
+      }
+    }
+  }, [code, applyStatePayload]);
+
+  useEffect(() => {
+    if (!code || !user || sessionEnded) return;
+    const ms = isConnected ? 30_000 : 3_000;
+    const id = setInterval(() => syncState(false), ms);
+    const onFocus = () => syncState(true);
     window.addEventListener("focus", onFocus);
     return () => { clearInterval(id); window.removeEventListener("focus", onFocus); };
-  }, [code, user, isConnected, syncState]);
+  }, [code, user, isConnected, sessionEnded, syncState]);
 
   // -------------------------------------------------------------------------
-  // VOTING PERSISTENCE
+  // TIMER COMPUTATION
   // -------------------------------------------------------------------------
-  useEffect(() => {
-    let activityKey: string | null = null;
+  const handleTimeUp = useCallback(() => {
+    setLocalTimeExpired(true);
+  }, []);
 
-    if (currentPoll) {
-      activityKey = `poll_${code}_${currentPoll.question}`;
-    } else if (quiz) {
-      activityKey = `quiz_${code}_${quiz.title}_${quiz.current_index}`;
+  const isTimerActive = Boolean(safeQuiz?.state === "QUESTION");
+  const timerDuration = safeQuizQuestion?.time_limit ?? 0;
+  const timerStartedAt = safeQuiz?.question_started_at; 
+
+  const timeLeft = useServerSyncedTimer(
+    isTimerActive, 
+    timerStartedAt, 
+    timerDuration, 
+    handleTimeUp, 
+    Boolean(isVoting || isSubmittingRef.current), 
+    serverTimeOffset
+  );
+
+  const progressPercent = useMemo(() => {
+    if (!safeQuizQuestion || (safeQuizQuestion.time_limit ?? 0) <= 0) return 0;
+    return Math.max(0, Math.min(100, (timeLeft / (safeQuizQuestion.time_limit ?? 30)) * 100));
+  }, [timeLeft, safeQuizQuestion]);
+
+  const isCritical = Boolean(safeQuiz?.state === "QUESTION" && !localTimeExpired && timeLeft > 0 && timeLeft <= 5);
+
+  // -------------------------------------------------------------------------
+  // DETERMINISTIC PERSISTENCE ENGINE
+  // -------------------------------------------------------------------------
+  const getActivityKey = useCallback(() => {
+    if (safePoll) {
+      if (!safePoll.id) {
+        if (process.env.NODE_ENV === 'development') throw new Error("System Integrity Fault: poll.id is mandatory.");
+        return null; 
+      }
+      return `poll_${code}_${safePoll.id}`;
+    } 
+    
+    if (safeQuiz) {
+      let qFingerprint = safeQuizQuestion?.id;
+      if (!qFingerprint && safeQuizQuestion?.text) {
+        try {
+          qFingerprint = typeof window !== 'undefined' 
+            ? btoa(encodeURIComponent(safeQuizQuestion.text)).substring(0, 32) 
+            : "q";
+        } catch { /* fallback */ }
+      }
+      return `quiz_${code}_idx${safeQuiz.current_index}_${qFingerprint || "q"}`;
     }
+    
+    return null;
+  }, [code, safePoll, safeQuiz, safeQuizQuestion]);
+
+  useEffect(() => {
+    const activityKey = getActivityKey();
 
     if (activityKey) {
+      setIsRestoringLocalState(true);
       const alreadyVoted = safeStorage.get(activityKey);
+      
       if (alreadyVoted) {
         setHasVoted(true);
-        const saved = safeStorage.get(activityKey + "_opt");
-        if (saved !== null) setSelectedOption(Number(saved));
+        const savedOpt = safeStorage.get(activityKey + "_opt");
+        if (savedOpt !== null) {
+          const numVal = Number(savedOpt);
+          const isNum = !Number.isNaN(numVal);
+          
+          if (safePoll?.type === 'rating' && isNum) setSelectedRating(numVal);
+          else if (safePoll) setSelectedPollValue(savedOpt);
+          else if (safeQuiz && isNum) setSelectedQuizIndex(numVal);
+        }
       } else {
         setHasVoted(false);
-        setSelectedOption(null);
+        setSelectedQuizIndex(null);
+        setSelectedPollValue(null);
+        setSelectedRating(null);
         setPollAnswer("");
       }
+      setIsRestoringLocalState(false);
     } else {
       setHasVoted(false);
     }
-  }, [currentPoll, quiz, code]);
+  }, [getActivityKey, safePoll, safeQuiz]);
 
-  const markAsVoted = (optionIndex?: number) => {
-    lastSyncTime.current = Date.now(); // pause heartbeat briefly
-
-    let activityKey: string | null = null;
-    if (currentPoll) {
-      activityKey = `poll_${code}_${currentPoll.question}`;
-    } else if (quiz) {
-      activityKey = `quiz_${code}_${quiz.title}_${quiz.current_index}`;
-    }
+  const markAsVoted = (type: 'quiz' | 'poll' | 'rating', savedVal?: string | number) => {
+    const activityKey = getActivityKey();
 
     if (activityKey) {
       safeStorage.set(activityKey, "true");
-      if (optionIndex !== undefined) {
-        safeStorage.set(activityKey + "_opt", String(optionIndex));
+      if (savedVal !== undefined) {
+        safeStorage.set(activityKey + "_opt", String(savedVal));
       }
     }
+    
     setHasVoted(true);
-    if (optionIndex !== undefined) setSelectedOption(optionIndex);
+    if (savedVal !== undefined) {
+      if (type === 'quiz') setSelectedQuizIndex(savedVal as number);
+      if (type === 'poll') setSelectedPollValue(String(savedVal));
+      if (type === 'rating') setSelectedRating(savedVal as number);
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -171,64 +426,117 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       });
       if (res.ok) {
         const data = await res.json();
-        // The store User type only has { id, email } — we store the display
-        // name in email since this is a guest session with no real email.
-        // To fix properly: add a `name` field to the User type in sessionStore.
+        if (!data.id) throw new Error("Server failed to assign identity block.");
         setUser({ id: data.id, email: data.name ?? data.email ?? guestName });
         setToken(data.token ?? "guest-token");
       } else {
-        alert("Failed to join. Check the session code and try again.");
+        alert("Session inaccessible. Please verify the code.");
       }
     } catch {
-      alert("Connection error. Please try again.");
+      alert("Network error. Please check your connection.");
     } finally {
       setIsJoining(false);
     }
   };
 
-  const handlePollVote = async (value: string | number) => {
-    if (hasVoted || isVoting) return;
+  const handlePollVote = async (value: string | number, isRating = false) => {
+    if (isSubmittingRef.current || hasVoted || isVoting || isRestoringLocalState || isPollClosed) return;
+    
+    isSubmittingRef.current = true;
     setIsVoting(true);
+    setTransmissionError(null);
+    
+    if (isRating) setSelectedRating(value as number);
+    else setSelectedPollValue(String(value));
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); 
+
     try {
       const res = await fetch(`${API_URL}/api/session/${code}/vote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value }),
+        body: JSON.stringify({ value, user_id: user?.id }), 
+        signal: controller.signal
       });
-      if (res.ok) markAsVoted();
-    } catch (e) {
-      console.error(e);
+      
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        markAsVoted(isRating ? 'rating' : 'poll', value);
+      } else if (res.status === 409) {
+        await syncState(true); 
+      } else {
+        throw new Error("Server rejected transmission");
+      }
+    } catch (e: unknown) {
+      clearTimeout(timeoutId);
+      if (isRating) setSelectedRating(null);
+      else setSelectedPollValue(null);
+      
+      if (e instanceof Error && e.name === 'AbortError') {
+        triggerError("Network Timeout. Protocol unlocked.");
+      } else {
+        triggerError("Transmission Failed. Please try again.");
+      }
     } finally {
       setIsVoting(false);
+      isSubmittingRef.current = false;
     }
   };
 
   const handleQuizAnswer = async (index: number) => {
-    if (hasVoted || isVoting || !user) return;
-    setSelectedOption(index); // optimistic
+    if (isSubmittingRef.current || hasVoted || isVoting || !user || localTimeExpired || isRestoringLocalState) return;
+    
+    isSubmittingRef.current = true;
     setIsVoting(true);
+    setTransmissionError(null);
+    setSelectedQuizIndex(index); 
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); 
+
     try {
       const res = await fetch(`${API_URL}/api/session/${code}/quiz/answer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          user_name: user.email || "Anonymous",
+          user_id: user.id, 
+          user_name: user.email || "Anonymous", 
           option_index: index,
         }),
+        signal: controller.signal
       });
-      if (res.ok) markAsVoted(index);
-      else setSelectedOption(null); // revert optimistic on failure
-    } catch (e) {
-      console.error(e);
-      setSelectedOption(null);
+      
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        markAsVoted('quiz', index);
+      } else if (res.status === 409) {
+        await syncState(true); 
+      } else {
+        throw new Error("Server rejected transmission");
+      }
+    } catch (e: unknown) {
+      clearTimeout(timeoutId);
+      setSelectedQuizIndex(null);
+      
+      if (e instanceof Error && e.name === 'AbortError') {
+        triggerError("Network Timeout. Protocol unlocked.");
+      } else {
+        triggerError("Transmission Failed. Please try again.");
+      }
     } finally {
       setIsVoting(false);
+      isSubmittingRef.current = false;
     }
   };
 
   const handleAskQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!questionText.trim() || isAskingQ) return;
+    if (!questionText.trim() || isAskingQ || isSubmittingRef.current) return;
+    
+    isSubmittingRef.current = true;
     setIsAskingQ(true);
     try {
       const res = await fetch(`${API_URL}/api/session/${code}/question`, {
@@ -241,80 +549,66 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       console.error(e);
     } finally {
       setIsAskingQ(false);
+      isSubmittingRef.current = false;
     }
   };
 
   // -------------------------------------------------------------------------
-  // DERIVED VALUES
-  // -------------------------------------------------------------------------
-  const safeQuizQuestion = useMemo(() => {
-    if (!quiz?.questions?.length) return null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const q = quiz.questions[quiz.current_index] as any;
-    if (!q) return null;
-    return {
-      text:       q.text     ?? q.question ?? "Question Loading...",
-      options:    q.options  ?? q.answers  ?? [],
-      time_limit: q.time_limit ?? 30,
-    };
-  }, [quiz]);
-
-  const myScore = quizScores?.[user?.email ?? "Anonymous"] ?? 0;
-
-  // Only show questions the presenter has made visible
-  const visibleQuestions = useMemo(
-    () => questions.filter((q) => q.visible !== false),
-    [questions]
-  );
-
-  // -------------------------------------------------------------------------
-  // LOADING SCREEN
+  // RENDER: LOADING / FATAL STATES
   // -------------------------------------------------------------------------
   if (!resolvedParams) {
     return (
       <div className="min-h-dvh bg-slate-950 flex items-center justify-center text-white">
-        <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin drop-shadow-[0_0_15px_rgba(59,130,246,0.8)]" />
+      </div>
+    );
+  }
+
+  if (sessionEnded) {
+    return (
+      <div className="min-h-dvh bg-slate-950 flex flex-col items-center justify-center p-6 text-white text-center">
+        <div className="text-6xl mb-6 grayscale opacity-50 drop-shadow-lg">🔌</div>
+        <h1 className="text-3xl font-black mb-2 text-slate-300 tracking-tight">Transmission Terminated</h1>
+        <p className="text-slate-500 font-medium max-w-xs">The host has concluded this event. You may safely disconnect.</p>
       </div>
     );
   }
 
   // -------------------------------------------------------------------------
-  // JOIN FORM
+  // RENDER: JOIN FORM
   // -------------------------------------------------------------------------
   if (!user) {
     return (
       <div className="min-h-dvh bg-slate-950 flex flex-col items-center justify-center p-6 text-white">
-        <div className="w-full max-w-sm bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-2xl animate-in zoom-in duration-300">
+        <div className="w-full max-w-sm bg-slate-900/80 border border-slate-800 p-8 rounded-4xl shadow-[0_10px_40px_rgba(0,0,0,0.5)] animate-in zoom-in-95 duration-300 backdrop-blur-xl">
           <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-bold mb-4 shadow-lg shadow-blue-900/50">
+            <div className="w-16 h-16 bg-blue-600 rounded-2xl mx-auto flex items-center justify-center text-2xl font-black mb-4 shadow-[0_0_20px_rgba(37,99,235,0.4)] border border-blue-400/30">
               FR
             </div>
-            <h1 className="text-3xl font-bold mb-2">Join Session</h1>
-            <p className="text-slate-400 text-sm">Enter your name to join the activity.</p>
+            <h1 className="text-3xl font-black mb-2 tracking-tight">Sync Link</h1>
+            <p className="text-slate-400 text-sm font-medium">Establish your identity protocol.</p>
           </div>
 
           <form onSubmit={handleJoinSession} className="space-y-6">
             <div>
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">
-                Your Name
+              <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-3 block">
+                Display Alias
               </label>
               <input
                 type="text"
                 value={guestName}
                 onChange={(e) => setGuestName(e.target.value)}
                 placeholder="e.g. John Doe"
-                className="w-full bg-slate-950 border border-slate-700 p-4 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500 transition placeholder:text-slate-600 font-medium text-lg"
+                className="w-full bg-slate-950 border border-slate-700 p-4 rounded-xl text-white outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all placeholder:text-slate-700 font-bold text-lg shadow-inner"
                 autoFocus
               />
             </div>
             <button
               type="submit"
-              disabled={!guestName.trim() || isJoining}
-              className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold py-4 rounded-xl transition shadow-lg flex justify-center items-center gap-2 active:scale-[0.98] text-lg"
+              disabled={Boolean(!guestName.trim() || isJoining)}
+              className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800/50 disabled:text-slate-600 disabled:border-slate-800 text-white font-black tracking-wide py-4 rounded-xl transition-transform duration-75 shadow-[0_5px_20px_rgba(37,99,235,0.3)] disabled:shadow-none flex justify-center items-center gap-2 active:scale-95 text-lg border border-blue-400/50"
             >
-              {isJoining
-                ? <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                : "Join Now 🚀"}
+              {isJoining ? <span className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" /> : "Enter Grid 🚀"}
             </button>
           </form>
         </div>
@@ -323,151 +617,146 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
   }
 
   // -------------------------------------------------------------------------
-  // MAIN VIEW
+  // RENDER: MAIN VIEW
   // -------------------------------------------------------------------------
   return (
     <div className="min-h-dvh bg-slate-950 text-white font-sans flex flex-col pb-28">
 
+      {/* FLOATING ERROR TOAST */}
+      {transmissionError && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-100 w-[90%] max-w-sm text-center p-3 bg-red-950/90 text-red-400 font-bold rounded-xl border border-red-500/50 shadow-[0_10px_40px_rgba(239,68,68,0.4)] text-xs tracking-wider uppercase backdrop-blur-md animate-in slide-in-from-top-4 fade-in">
+          {transmissionError}
+        </div>
+      )}
+
       {/* HEADER */}
-      <header className="px-4 py-3 border-b border-slate-800 flex justify-between items-center bg-slate-900/80 backdrop-blur-md sticky top-0 z-20">
-        <div className="flex items-center gap-2">
+      <header className="px-5 py-4 border-b border-slate-800/80 flex justify-between items-center bg-slate-950/80 backdrop-blur-xl sticky top-0 z-20">
+        <div className="flex items-center gap-3">
           {branding?.logo_url ? (
-            <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded" />
+            <Image src={branding.logo_url} alt="Logo" width={32} height={32} className="rounded-lg shadow-sm" />
           ) : (
-            <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-xs">
-              FR
-            </div>
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-black text-xs shadow-[0_0_10px_rgba(37,99,235,0.4)]">FR</div>
           )}
-          <span className="font-bold hidden sm:block">FlexiRush</span>
+          <span className="font-black tracking-tight hidden sm:block">FlexiRush</span>
         </div>
 
         <div className="flex items-center gap-3">
-          <div
-            className={`w-2 h-2 rounded-full transition-colors ${
-              isConnected ? "bg-green-500 shadow-[0_0_8px_#22c55e]" : "bg-red-500"
-            }`}
-          />
-          <span className="font-mono bg-slate-800 px-3 py-1 rounded-lg text-xs border border-slate-700 font-bold tracking-widest">
-            {code}
-          </span>
-          <span className="text-xs text-slate-400 hidden sm:block">
-            {user.email}
-          </span>
+          <div className={`w-2 h-2 rounded-full transition-colors duration-150 ${isConnected ? "bg-green-500 shadow-[0_0_10px_#22c55e]" : "bg-red-500 shadow-[0_0_10px_#ef4444]"}`} />
+          <span className="font-mono bg-slate-900 px-3 py-1.5 rounded-lg text-xs border border-slate-700 font-bold tracking-widest shadow-inner">{code}</span>
+          <span className="text-xs font-bold text-slate-400 hidden sm:block truncate max-w-25">{user.email}</span>
         </div>
       </header>
 
-      {/* MAIN */}
-      <main className="flex-1 flex flex-col p-4 max-w-md mx-auto w-full">
+      {/* MAIN CONTENT AREA */}
+      <main className="flex-1 flex flex-col p-5 max-w-md mx-auto w-full">
 
-        {/* ================================================================ */}
-        {/* TAB: ACTIVITY                                                      */}
-        {/* ================================================================ */}
+        {/* TAB: ACTIVITY */}
         {activeTab === "activity" && (
-          <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-300 w-full">
 
-            {/* SCENARIO 1: QUIZ (active) */}
-            {quiz && quiz.state !== "END" && (
+            {/* SCENARIO 1: QUIZ ACTIVE */}
+            {safeQuiz && safeQuiz.state !== "END" && (
               <div className="w-full">
                 <div className="text-center mb-8">
-                  <span className="bg-purple-900/30 text-purple-300 text-xs font-bold px-4 py-1.5 rounded-full border border-purple-500/30 uppercase tracking-widest">
-                    {quiz.state === "LOBBY"
-                      ? "Quiz Lobby"
-                      : `Question ${quiz.current_index + 1}`}
+                  <span className={`text-[10px] font-black px-4 py-2 rounded-full border uppercase tracking-[0.2em] shadow-sm transition-colors duration-150 ${isCritical ? 'bg-red-950/40 text-red-400 border-red-500/50' : 'bg-slate-900 text-slate-300 border-slate-700/80'}`}>
+                    {safeQuiz.state === "LOBBY" ? "Standby Protocol" : `Phase ${safeQuiz.current_index + 1}`}
                   </span>
                 </div>
 
-                {/* STATE: LOBBY */}
-                {quiz.state === "LOBBY" && (
-                  <div className="text-center py-10">
-                    <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-br from-purple-400 to-pink-600 mb-6">
-                      Get Ready!
+                {/* LOBBY */}
+                {safeQuiz.state === "LOBBY" && (
+                  <div className="text-center py-16 animate-in zoom-in-95 duration-500">
+                    <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-b from-blue-300 to-indigo-500 mb-6 drop-shadow-sm tracking-tight">
+                      Standby
                     </h1>
-                    <p className="text-slate-400 text-lg">The quiz will start soon.</p>
-                    <div className="mt-12 text-7xl animate-bounce">🚀</div>
+                    <p className="text-slate-400 text-sm font-bold tracking-widest uppercase">Awaiting Host Telemetry</p>
+                    <div className="mt-12 text-7xl animate-bounce drop-shadow-2xl">🚀</div>
                   </div>
                 )}
 
-                {/* STATE: QUESTION */}
-                {quiz.state === "QUESTION" && (
+                {/* QUESTION */}
+                {safeQuiz.state === "QUESTION" && (
                   safeQuizQuestion ? (
-                    // key forces full remount (and timer reset) on each new question
-                    <div key={quiz.current_index} className="space-y-8 animate-in fade-in">
-                      <h2 className="text-2xl sm:text-3xl font-bold text-center leading-snug">
+                    <div key={safeQuiz.current_index} className={`space-y-8 animate-in fade-in duration-300 transition-all ${isCritical ? 'scale-[1.02] drop-shadow-[0_0_15px_rgba(239,68,68,0.2)]' : 'scale-100'}`}>
+                      <h2 className={`text-2xl sm:text-3xl font-black text-center leading-tight drop-shadow-md tracking-tight transition-colors duration-150 ${isCritical ? 'text-red-400' : 'text-white'}`}>
                         {safeQuizQuestion.text}
                       </h2>
 
-                      {/* Timer bar */}
-                      <div className="h-3 bg-slate-800 rounded-full overflow-hidden w-full shadow-inner">
+                      {/* Hardware-Grade Fuse Timer */}
+                      <div className="h-2.5 bg-slate-900 rounded-full overflow-hidden w-full border border-slate-800 shadow-inner relative">
                         <div
-                          className="h-full bg-linear-to-r from-purple-500 to-pink-500 origin-left"
-                          /* webhint: ignore no-inline-styles */
-                          style={{
-                            width: "100%",
-                            animation: `width_linear ${safeQuizQuestion.time_limit}s linear forwards`,
-                          }}
+                          className={`h-full origin-left transition-all duration-500 ease-linear w-(--val) ${isCritical ? "bg-red-500 shadow-[0_0_15px_rgba(239,68,68,1)]" : "bg-linear-to-r from-blue-500 to-indigo-500 shadow-[0_0_10px_rgba(79,70,229,0.8)]"}`}
+                          style={{ "--val": `${progressPercent}%` } as React.CSSProperties}
                         />
                       </div>
 
                       {/* Options */}
-                      <div className="grid gap-3">
-                        {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                        {safeQuizQuestion.options.map((opt: any, i: number) => {
-                          const isSelected = selectedOption === i;
+                      <div className="grid gap-4">
+                        {safeQuizQuestion.options.map((opt: unknown, i: number) => {
+                          const isSelected = selectedQuizIndex === i;
                           const voted = hasVoted;
+                          const labelStr = typeof opt === "string" ? opt : (opt as {label: string}).label;
                           return (
                             <button
                               key={i}
-                              disabled={voted || isVoting}
+                              disabled={Boolean(voted || isVoting || isSubmittingRef.current || localTimeExpired || isRestoringLocalState)}
                               onClick={() => handleQuizAnswer(i)}
-                              className={`p-5 rounded-2xl text-lg font-bold transition-all active:scale-[0.98] flex items-center gap-4 text-left border-2 shadow-lg
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  handleQuizAnswer(i);
+                                }
+                              }}
+                              className={`p-6 rounded-2xl text-lg font-bold transition-all duration-75 active:scale-95 flex items-center gap-5 text-left border-2 focus:outline-none focus:ring-2 focus:ring-blue-500
                                 ${voted
                                   ? isSelected
-                                    ? "bg-purple-600 border-purple-500 text-white shadow-purple-900/50"
-                                    : "bg-slate-800 border-slate-800 text-slate-500 opacity-50"
-                                  : "bg-slate-800 border-slate-700 hover:border-purple-500 text-slate-200"
+                                    ? "bg-blue-600/90 border-blue-400 text-white shadow-[0_0_20px_rgba(37,99,235,0.4)]"
+                                    : "bg-slate-900/50 border-slate-800 text-slate-600 opacity-50 grayscale"
+                                  : localTimeExpired
+                                    ? "bg-slate-900/50 border-slate-800 text-slate-600 opacity-50 cursor-not-allowed"
+                                    : isCritical 
+                                      ? "bg-red-950/20 border-red-500/30 text-slate-200 hover:border-red-400" 
+                                      : "bg-slate-900/80 border-slate-700 hover:border-blue-500/50 text-slate-200 shadow-lg"
                                 }`}
                             >
-                              <span
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
-                                  voted && isSelected ? "bg-white/20" : "bg-black/30"
-                                }`}
-                              >
-                                {["A", "B", "C", "D"][i]}
+                              <span className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-black shrink-0 shadow-inner transition-colors ${voted && isSelected ? "bg-white/20" : "bg-slate-950 border border-slate-800"}`}>
+                                {String.fromCharCode(65 + i)}
                               </span>
-                              {typeof opt === "string" ? opt : opt.label}
+                              <span className="leading-snug">{labelStr}</span>
                             </button>
                           );
                         })}
                       </div>
 
-                      {hasVoted && (
-                        <div className="text-center p-3 bg-green-900/30 text-green-400 font-bold rounded-xl border border-green-500/30 animate-pulse">
-                          Answer Sent! 🔒
+                      {hasVoted ? (
+                        <div className="text-center p-4 bg-green-950/40 text-green-400 font-black rounded-2xl border border-green-500/30 animate-in slide-in-from-bottom-2 fade-in shadow-[0_0_15px_rgba(34,197,94,0.15)] uppercase tracking-widest text-xs">
+                          Signal Locked 🔒
                         </div>
-                      )}
+                      ) : localTimeExpired ? (
+                         <div className="text-center p-4 bg-red-950/40 text-red-400 font-black rounded-2xl border border-red-500/30 animate-in slide-in-from-bottom-2 fade-in shadow-[0_0_15px_rgba(239,68,68,0.15)] uppercase tracking-widest text-xs">
+                          Time Expired ⏱
+                        </div>
+                      ) : null}
                     </div>
                   ) : (
-                    <div className="text-center py-20 text-slate-500 animate-pulse">
-                      <div className="text-6xl mb-4">⏳</div>
-                      <p>Loading question…</p>
+                    <div className="text-center py-20 animate-pulse">
+                      <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-6 shadow-[0_0_15px_rgba(59,130,246,0.5)]" />
+                      <p className="font-black text-slate-500 uppercase tracking-[0.2em] text-xs">Decoding Matrix...</p>
                     </div>
                   )
                 )}
 
-                {/* STATE: LEADERBOARD */}
-                {quiz.state === "LEADERBOARD" && (
-                  <div className="text-center py-10 space-y-8 animate-in zoom-in">
-                    <h2 className="text-4xl font-black text-yellow-400 drop-shadow-md">
-                      Time&apos;s Up!
+                {/* LEADERBOARD */}
+                {safeQuiz.state === "LEADERBOARD" && (
+                  <div className="text-center py-12 space-y-10 animate-in zoom-in-95 duration-500">
+                    <h2 className="text-5xl font-black text-yellow-400 drop-shadow-[0_0_15px_rgba(250,204,21,0.4)] tracking-tighter">
+                      Phase Complete
                     </h2>
-                    <div className="bg-slate-800 p-8 rounded-3xl border border-slate-700 shadow-2xl">
-                      <p className="text-slate-400 text-xs uppercase tracking-widest mb-2 font-bold">
-                        Your Score
-                      </p>
-                      <p className="text-6xl font-mono font-bold text-white tracking-tighter">
-                        {myScore}
-                      </p>
-                      <p className="text-slate-500 text-xs mt-2">pts</p>
+                    <div className="bg-slate-900/80 p-10 rounded-4xl border border-slate-700/50 shadow-2xl relative overflow-hidden">
+                      <div className="absolute top-0 left-0 w-full h-1 bg-linear-to-r from-transparent via-blue-500 to-transparent opacity-50" />
+                      <p className="text-slate-400 text-[10px] uppercase tracking-[0.3em] mb-4 font-black">Current Telemetry</p>
+                      <p className="text-7xl font-mono font-black text-white tracking-tighter drop-shadow-md">{myScore}</p>
+                      <p className="text-blue-500 font-bold text-xs mt-3 uppercase tracking-widest">Points</p>
                     </div>
                   </div>
                 )}
@@ -475,100 +764,118 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
             )}
 
             {/* SCENARIO 2: QUIZ ENDED */}
-            {quiz && quiz.state === "END" && (
-              <div className="text-center py-10 space-y-8 animate-in zoom-in duration-500">
-                <h1 className="text-5xl font-black text-transparent bg-clip-text bg-linear-to-r from-yellow-400 to-orange-500">
-                  Game Over!
+            {safeQuiz && safeQuiz.state === "END" && (
+              <div className="text-center py-12 space-y-10 animate-in zoom-in-95 duration-700">
+                <h1 className="text-6xl font-black text-transparent bg-clip-text bg-linear-to-b from-yellow-300 to-yellow-600 drop-shadow-lg tracking-tighter">
+                  VICTORY
                 </h1>
-                <div className="bg-slate-800 p-8 rounded-3xl border border-yellow-500/30 shadow-2xl">
-                  <p className="text-slate-400 text-xs uppercase tracking-widest mb-2 font-bold">
-                    Your Final Score
-                  </p>
-                  <p className="text-6xl font-mono font-bold text-white tracking-tighter">
-                    {myScore}
-                  </p>
-                  <p className="text-slate-500 text-xs mt-2">pts</p>
+                <div className="bg-slate-900/80 p-10 rounded-4xl border border-yellow-500/30 shadow-[0_0_40px_rgba(234,179,8,0.15)] relative overflow-hidden">
+                  <p className="text-yellow-500/80 text-[10px] uppercase tracking-[0.3em] mb-4 font-black">Final Telemetry</p>
+                  <p className="text-7xl font-mono font-black text-white tracking-tighter drop-shadow-md">{myScore}</p>
+                  <p className="text-yellow-600 font-bold text-xs mt-3 uppercase tracking-widest">Points</p>
                 </div>
-                <p className="text-slate-400">Thanks for playing! 🎉</p>
+                <p className="text-slate-400 font-bold tracking-wide">Event Concluded 🎉</p>
               </div>
             )}
 
             {/* SCENARIO 3: POLL */}
-            {!quiz && currentPoll && (
-              <div
-                key={currentPoll.question}
-                className="w-full space-y-8 animate-in fade-in zoom-in duration-300"
-              >
+            {!safeQuiz && safePoll && (
+              <div key={safePoll.id || safePoll.question} className="w-full space-y-10 animate-in fade-in zoom-in-95 duration-300">
                 <div className="text-center">
-                  <span className="bg-blue-900/30 text-blue-300 text-xs font-bold px-4 py-1.5 rounded-full border border-blue-500/30 uppercase tracking-widest">
-                    Live Poll
+                  <span className={`text-[10px] font-black px-4 py-2 rounded-full border uppercase tracking-[0.2em] shadow-sm ${isPollClosed ? 'bg-slate-800 text-slate-500 border-slate-700' : 'bg-slate-900 text-slate-300 border-slate-700/80'}`}>
+                    {isPollClosed ? "Collection Concluded" : "Live Data Collection"}
                   </span>
                 </div>
-                <h2 className="text-3xl font-bold text-center leading-snug">
-                  {currentPoll.question}
+                <h2 className={`text-3xl font-black text-center leading-tight tracking-tight drop-shadow-sm ${isPollClosed ? 'text-slate-400' : 'text-white'}`}>
+                  {safePoll.question}
                 </h2>
 
-                {/* Multiple choice */}
-                {currentPoll.type === "multiple_choice" && (
-                  <div className="grid gap-3">
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    {currentPoll.options?.map((opt: any, i: number) => (
-                      <button
-                        key={i}
-                        onClick={() => handlePollVote(opt.label)}
-                        disabled={hasVoted || isVoting}
-                        className={`p-5 rounded-2xl font-bold text-left transition-all shadow-lg active:scale-[0.98] ${
-                          hasVoted
-                            ? "bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700"
-                            : "bg-blue-600 hover:bg-blue-500 text-white"
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
+                {/* Multiple Choice */}
+                {safePoll.type === "multiple_choice" && (
+                  <div className="grid gap-4">
+                    {safePoll.options?.map((opt: { label: string }, i: number) => {
+                      const isSelected = selectedPollValue === opt.label;
+                      
+                      if (hasVoted || isPollClosed) {
+                         const count = pollResults?.[opt.label] ?? 0;
+                         const pct = totalPollVotes > 0 ? (count / totalPollVotes) * 100 : 0;
+                         return (
+                          <div key={i} className="relative group animate-in slide-in-from-left-4 fade-in duration-500">
+                            <div className={`flex justify-between items-end text-lg font-bold mb-2 px-2 ${isSelected ? 'text-white' : 'text-slate-400'}`}>
+                              <span>{opt.label}</span>
+                              <div className="flex items-center gap-4">
+                                <span className="text-slate-500 font-mono text-sm">{Math.round(pct)}%</span>
+                                <span className={`font-black text-xl drop-shadow-sm ${isSelected ? 'text-blue-400' : 'text-slate-500'}`}>{count}</span>
+                              </div>
+                            </div>
+                            <div className="h-4 bg-slate-900 rounded-full overflow-hidden border border-slate-800 shadow-inner">
+                              <div className={`h-full rounded-full transition-all duration-1000 w-(--val) ease-out relative ${isSelected ? 'bg-linear-to-r from-blue-600 to-indigo-500 shadow-[0_0_10px_rgba(79,70,229,0.5)]' : 'bg-slate-700'}`} style={{ "--val": `${pct}%` } as React.CSSProperties}>
+                                {isSelected && <div className="absolute inset-0 bg-white/10 animate-[shimmer_2s_infinite]" />}
+                              </div>
+                            </div>
+                          </div>
+                         );
+                      }
+
+                      return (
+                        <button
+                          key={i}
+                          onClick={() => handlePollVote(opt.label, false)}
+                          disabled={Boolean(isVoting || isSubmittingRef.current || isRestoringLocalState)}
+                          className="p-6 rounded-2xl font-bold text-left transition-transform duration-75 active:scale-95 border-2 shadow-lg bg-slate-900/80 border-slate-700 hover:border-blue-500 text-slate-200"
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
 
-                {/* Word cloud / open ended */}
-                {(currentPoll.type === "word_cloud" ||
-                  currentPoll.type === "open_ended") && (
-                  <div className="space-y-4">
+                {/* Open Ended / Word Cloud */}
+                {(safePoll.type === "word_cloud" || safePoll.type === "open_ended") && (
+                  <div className="space-y-5">
                     <textarea
                       value={pollAnswer}
                       onChange={(e) => setPollAnswer(e.target.value)}
-                      placeholder="Type your answer here..."
-                      className="w-full p-5 bg-slate-800 border border-slate-700 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-white placeholder:text-slate-500 resize-none h-32 text-lg"
-                      disabled={hasVoted}
+                      placeholder={isPollClosed ? "Collection Concluded" : "Transmit response..."}
+                      className="w-full p-5 bg-slate-900/80 border border-slate-700 rounded-2xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-white placeholder:text-slate-600 resize-none h-36 text-lg font-medium shadow-inner disabled:opacity-50 disabled:bg-slate-900/50"
+                      disabled={Boolean(hasVoted || isSubmittingRef.current || isRestoringLocalState || isPollClosed)}
                     />
                     <button
-                      onClick={() => handlePollVote(pollAnswer)}
-                      disabled={!pollAnswer.trim() || hasVoted || isVoting}
-                      className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg active:scale-[0.98]"
+                      onClick={() => handlePollVote(pollAnswer, false)}
+                      disabled={Boolean(!pollAnswer.trim() || hasVoted || isVoting || isSubmittingRef.current || isRestoringLocalState || isPollClosed)}
+                      className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800/50 disabled:text-slate-600 disabled:border-slate-800 text-white font-black tracking-wide rounded-xl transition-transform duration-75 shadow-[0_5px_20px_rgba(37,99,235,0.3)] disabled:shadow-none active:scale-95 border border-blue-400/50"
                     >
-                      {hasVoted ? "Sent! ✅" : isVoting ? "Sending…" : "Submit Answer"}
+                      {hasVoted ? "Signal Locked ✅" : isVoting ? "Transmitting…" : isPollClosed ? "Channel Closed" : "Send Data"}
                     </button>
                   </div>
                 )}
 
-                {/* Rating — highlights selected star after voting */}
-                {currentPoll.type === "rating" && (
-                  <div className="flex justify-center gap-3 py-10">
+                {/* Rating */}
+                {safePoll.type === "rating" && (
+                  <div className="flex justify-center gap-3 py-12 bg-slate-900/40 rounded-4xl border border-slate-800/50">
                     {[1, 2, 3, 4, 5].map((star) => {
-                      const isChosen = hasVoted && selectedOption === star;
+                      const isChosen = hasVoted && selectedRating === star;
                       return (
                         <button
                           key={star}
-                          onClick={() => {
-                            setSelectedOption(star);
-                            handlePollVote(star);
+                          tabIndex={0}
+                          onClick={() => handlePollVote(star, true)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              handlePollVote(star, true);
+                            }
                           }}
-                          disabled={hasVoted || isVoting}
-                          className={`text-5xl transition-transform hover:scale-125 active:scale-90 ${
+                          disabled={Boolean(hasVoted || isVoting || isSubmittingRef.current || isRestoringLocalState || isPollClosed)}
+                          className={`text-5xl transition-all duration-75 active:scale-75 focus:outline-none focus:ring-2 focus:ring-yellow-400 rounded-full ${
                             hasVoted
                               ? isChosen
-                                ? "text-yellow-400 scale-110"
-                                : "opacity-30 cursor-default grayscale"
-                              : "cursor-pointer text-slate-400 hover:text-yellow-400"
+                                ? "text-yellow-400 scale-125 drop-shadow-[0_0_15px_rgba(250,204,21,0.6)]"
+                                : "opacity-20 cursor-default grayscale"
+                              : isPollClosed
+                                ? "opacity-20 cursor-not-allowed grayscale"
+                                : "cursor-pointer text-slate-700 hover:text-yellow-400 hover:scale-110"
                           }`}
                         >
                           ★
@@ -578,71 +885,68 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
                   </div>
                 )}
 
-                {hasVoted && currentPoll.type !== "word_cloud" && currentPoll.type !== "open_ended" && (
-                  <div className="text-center p-3 bg-green-900/30 text-green-400 font-bold rounded-xl border border-green-500/30 animate-pulse">
-                    Response Recorded! ✅
+                {hasVoted && safePoll.type !== "word_cloud" && safePoll.type !== "open_ended" && safePoll.type !== "multiple_choice" && (
+                  <div className="text-center p-4 bg-green-950/40 text-green-400 font-black rounded-2xl border border-green-500/30 animate-in slide-in-from-bottom-2 fade-in shadow-[0_0_15px_rgba(34,197,94,0.15)] uppercase tracking-widest text-xs">
+                    Signal Locked 🔒
                   </div>
                 )}
               </div>
             )}
 
             {/* SCENARIO 4: WAITING */}
-            {!quiz && !currentPoll && (
-              <div className="text-center py-20 text-slate-500">
-                <div className="text-7xl mb-6 grayscale opacity-20">☕</div>
-                <h2 className="text-2xl font-bold text-slate-300 mb-2">
-                  Waiting for Presenter
-                </h2>
-                <p className="text-sm">Sit back and relax! The session will resume shortly.</p>
+            {!safeQuiz && !safePoll && (
+              <div className="text-center py-24 text-slate-500">
+                <div className="w-24 h-24 mb-8 bg-slate-900/50 rounded-full flex items-center justify-center mx-auto border border-slate-800 shadow-inner">
+                  <span className="text-5xl grayscale opacity-30">📡</span>
+                </div>
+                <h2 className="text-2xl font-black text-white mb-3 tracking-tight">Channel Open</h2>
+                <p className="text-sm font-medium">Awaiting host telemetry...</p>
               </div>
             )}
           </div>
         )}
 
-        {/* ================================================================ */}
-        {/* TAB: Q&A                                                           */}
-        {/* ================================================================ */}
+        {/* TAB: Q&A */}
         {activeTab === "qna" && (
-          <div className="w-full h-full flex flex-col animate-in fade-in slide-in-from-right-2 duration-300">
-            <div className="mb-6">
-              <h2 className="text-2xl font-bold text-white mb-2">Ask a Question</h2>
-              <p className="text-slate-400 text-sm">Send your questions to the presenter.</p>
+          <div className="w-full h-full flex flex-col animate-in fade-in slide-in-from-right-4 duration-150">
+            <div className="mb-8">
+              <h2 className="text-3xl font-black text-white mb-2 tracking-tight">Comms Channel</h2>
+              <p className="text-slate-400 text-sm font-medium">Transmit inquiries directly to the host.</p>
             </div>
 
-            <form onSubmit={handleAskQuestion} className="mb-8">
+            <form onSubmit={handleAskQuestion} className="mb-8 relative">
               <textarea
                 value={questionText}
                 onChange={(e) => setQuestionText(e.target.value)}
-                placeholder="Type your question..."
-                className="w-full bg-slate-800 border border-slate-700 p-4 rounded-xl text-white focus:ring-2 focus:ring-blue-500 outline-none resize-none h-32 mb-4 text-base"
+                placeholder="Initialize transmission..."
+                className="w-full bg-slate-900/80 border border-slate-700 p-5 rounded-2xl text-white focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none resize-none h-32 mb-4 text-base shadow-inner placeholder:text-slate-600 font-medium"
               />
               <button
                 type="submit"
-                disabled={!questionText.trim() || isAskingQ}
-                className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white font-bold rounded-xl transition shadow-lg active:scale-[0.98]"
+                disabled={Boolean(!questionText.trim() || isAskingQ || isSubmittingRef.current)}
+                className="w-full py-4 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-800/50 disabled:text-slate-600 disabled:border-slate-800 text-white font-black tracking-wide rounded-xl transition-transform duration-75 shadow-[0_5px_20px_rgba(168,85,247,0.3)] disabled:shadow-none active:scale-95 border border-purple-400/50"
               >
-                {isAskingQ ? "Sending…" : "Submit Question"}
+                {isAskingQ ? "Transmitting…" : "Send Transmission 🚀"}
               </button>
             </form>
 
-            <div className="flex-1 overflow-y-auto custom-scrollbar pb-4">
-              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">
-                Questions ({visibleQuestions.length})
+            <div className="flex-1 overflow-y-auto custom-scrollbar pb-6">
+              <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-5 border-b border-slate-800 pb-2">
+                Active Log ({visibleQuestions.length})
               </h3>
 
               {visibleQuestions.length === 0 ? (
-                <p className="text-slate-600 italic text-center py-10">
-                  No questions yet. Be the first!
+                <p className="text-slate-600 font-bold tracking-widest uppercase text-xs text-center py-12 border border-dashed border-slate-800 rounded-2xl">
+                  Log is Empty
                 </p>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-4">
                   {visibleQuestions.map((q) => (
-                    <div
-                      key={q.id}
-                      className="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50"
-                    >
-                      <p className="text-slate-200 text-base leading-relaxed">{q.text}</p>
-                      <p className="text-xs text-slate-500 mt-2">▲ {q.votes} upvotes</p>
+                    <div key={q.id} className="bg-slate-900/50 p-5 rounded-2xl border border-slate-800/80 shadow-sm flex flex-col gap-3">
+                      <p className="text-slate-200 text-base font-medium leading-relaxed">{q.text}</p>
+                      <div className="flex items-center gap-2">
+                        <span className="text-purple-400 bg-purple-950/30 px-2 py-1 rounded text-xs font-black border border-purple-900/50">▲ {q.votes}</span>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -653,20 +957,22 @@ export default function JoinPage({ params }: { params: Promise<{ code: string }>
       </main>
 
       {/* BOTTOM TAB BAR */}
-      <div className="fixed bottom-0 left-0 w-full bg-slate-900/90 backdrop-blur-lg border-t border-slate-800 p-2 z-30 pb-safe">
-        <div className="flex justify-center gap-2 max-w-md mx-auto">
+      <div className="fixed bottom-0 left-0 w-full bg-slate-950/95 backdrop-blur-xl border-t border-slate-800/80 p-3 z-30 pb-safe">
+        <div className="flex justify-center gap-3 max-w-md mx-auto">
           {(["activity", "qna"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex flex-col items-center gap-1 active:scale-95 ${
+              className={`flex-1 py-3.5 rounded-xl font-black text-xs uppercase tracking-widest transition-colors duration-75 flex flex-col items-center gap-1.5 active:scale-95 ${
                 activeTab === tab
-                  ? "bg-blue-600 text-white shadow-lg shadow-blue-900/20"
-                  : "text-slate-500 hover:bg-slate-800 hover:text-slate-300"
+                  ? "bg-slate-800 text-white shadow-inner border border-slate-700"
+                  : "text-slate-500 hover:bg-slate-900 hover:text-slate-400 border border-transparent"
               }`}
             >
-              <span className="text-xl">{tab === "activity" ? "📊" : "💬"}</span>
-              {tab === "activity" ? "Activity" : "Q&A"}
+              <span className={`text-xl drop-shadow-sm ${activeTab === tab && tab === 'activity' ? 'text-blue-400' : activeTab === tab && tab === 'qna' ? 'text-purple-400' : 'grayscale opacity-50'}`}>
+                {tab === "activity" ? "📊" : "💬"}
+              </span>
+              {tab === "activity" ? "Telemetry" : "Comms"}
             </button>
           ))}
         </div>
